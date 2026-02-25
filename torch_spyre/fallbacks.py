@@ -230,4 +230,4 @@ def spyre__embedding(weight, indices, *args, **kwargs):
     supported by Spyre's current pointwise operation framework.
     """
     # TODO: Remove this fallback once we enable gather/scatter ops on spyre
-    return aten.embedding(weight, indices,*args, **kwargs)
+    return aten.embedding(weight, indices, *args, **kwargs)
