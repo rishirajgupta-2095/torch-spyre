@@ -294,6 +294,7 @@ void SpyreTensorImpl::shallow_copy_from(
     this->spyre_layout = spyre_impl->spyre_layout;
     this->dma_sizes = spyre_impl->dma_sizes;
     this->dma_strides = spyre_impl->dma_strides;
+    DEBUGINFO("SpyreTensorImpl::shallow_copy_from: ", this->spyre_layout.toString());
   }
 }
 
