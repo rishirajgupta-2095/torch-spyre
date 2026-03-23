@@ -290,6 +290,11 @@ void SpyreTensorImpl::shallow_copy_from(
     const at::intrusive_ptr<at::TensorImpl>& impl) {
   DEBUGINFO("Parent's implementation");
   at::TensorImpl::shallow_copy_from(impl);
+  if (auto* spyre_impl = dynamic_cast<SpyreTensorImpl*>(impl.get())) {
+    this->spyre_layout = spyre_impl->spyre_layout;
+    this->dma_sizes = spyre_impl->dma_sizes;
+    this->dma_strides = spyre_impl->dma_strides;
+  }
 }
 
 uint64_t get_device_size_in_bytes(SpyreTensorLayout stl) {
