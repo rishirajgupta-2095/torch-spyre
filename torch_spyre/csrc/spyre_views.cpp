@@ -147,6 +147,7 @@ static at::Tensor spyre_alias_with_sizes_and_strides(const at::Tensor& self,
     spyre_tensor_impl_->dma_strides =
         std::vector<int64_t>(strides.begin(), strides.end());
   }
+  DEBUGINFO("spyre_alias_with_sizes_and_strides layout: ", spyre_tensor_impl_->spyre_layout.toString());
   return self_;
 }
 
@@ -188,6 +189,7 @@ static at::Tensor spyre_alias_with_sizes_and_strides(
     spyre_tensor_impl_->dma_sizes = dma_sizes;
     spyre_tensor_impl_->dma_strides = dma_strides;
   }
+  DEBUGINFO("spyre_alias_with_sizes_and_strides (sym) layout: ", spyre_tensor_impl_->spyre_layout.toString());
   return self_;
 }
 
@@ -248,6 +250,7 @@ at::Tensor as_strided_with_layout(const at::Tensor& self, c10::IntArrayRef size,
     spyre_impl->dma_sizes = size.vec();
     spyre_impl->dma_strides = stride.vec();
   }
+  DEBUGINFO("as_strided_with_layout layout: ", spyre_impl->spyre_layout.toString());
 
   return result;
 }
@@ -287,6 +290,7 @@ at::Tensor reinterpret_tensor_with_layout(const at::Tensor& self,
     spyre_tensor_impl_->dma_sizes = size.vec();
     spyre_tensor_impl_->dma_strides = stride.vec();
   }
+  DEBUGINFO("reinterpret_tensor_with_layout layout: ", spyre_tensor_impl_->spyre_layout.toString());
   return self_;
 }
 

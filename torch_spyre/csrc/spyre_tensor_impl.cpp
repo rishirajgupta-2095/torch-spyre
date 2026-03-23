@@ -218,6 +218,7 @@ SpyreTensorImpl::SpyreTensorImpl(c10::Storage&& storage,
                                  c10::DispatchKeySet key_set,
                                  const caffe2::TypeMeta& dtype)
     : TensorImpl(std::move(storage), key_set, dtype) {
+  DEBUGINFO("SpyreTensorImpl Ctor 1 (no layout)");
   set_custom_sizes_strides(c10::TensorImpl::SizesStridesPolicy::Default);
 }
 
@@ -226,6 +227,7 @@ SpyreTensorImpl::SpyreTensorImpl(at::TensorImpl::ImplType unused,
                                  c10::DispatchKeySet key_set,
                                  const caffe2::TypeMeta data_type)
     : TensorImpl(unused, std::move(storage), key_set, data_type) {
+  DEBUGINFO("SpyreTensorImpl Ctor 2 (no layout)");
   set_custom_sizes_strides(c10::TensorImpl::SizesStridesPolicy::Default);
 }
 
@@ -234,6 +236,7 @@ SpyreTensorImpl::SpyreTensorImpl(c10::Storage storage,
                                  const caffe2::TypeMeta& dtype,
                                  SpyreTensorLayout stl)
     : TensorImpl(std::move(storage), key_set, dtype) {
+  DEBUGINFO("SpyreTensorImpl Ctor 3 with layout: ", stl.toString());
   set_custom_sizes_strides(c10::TensorImpl::SizesStridesPolicy::Default);
   this->spyre_layout = stl;
 }
@@ -288,13 +291,15 @@ at::intrusive_ptr<c10::TensorImpl> SpyreTensorImpl::shallow_copy_and_detach(
 // storage basic operation (view) to work
 void SpyreTensorImpl::shallow_copy_from(
     const at::intrusive_ptr<at::TensorImpl>& impl) {
-  DEBUGINFO("Parent's implementation");
+  DEBUGINFO("SpyreTensorImpl::shallow_copy_from");
   at::TensorImpl::shallow_copy_from(impl);
   if (auto* spyre_impl = dynamic_cast<SpyreTensorImpl*>(impl.get())) {
     this->spyre_layout = spyre_impl->spyre_layout;
     this->dma_sizes = spyre_impl->dma_sizes;
     this->dma_strides = spyre_impl->dma_strides;
-    DEBUGINFO("SpyreTensorImpl::shallow_copy_from: ", this->spyre_layout.toString());
+    DEBUGINFO("SpyreTensorImpl::shallow_copy_from copied layout: ", this->spyre_layout.toString());
+  } else {
+    DEBUGINFO("SpyreTensorImpl::shallow_copy_from: source is not SpyreTensorImpl");
   }
 }
 
