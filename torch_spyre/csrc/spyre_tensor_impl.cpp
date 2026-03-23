@@ -266,6 +266,8 @@ SpyreTensorImpl::shallow_copy_and_detach_core(
       /*dest_impl=*/impl.get(),
       /*version_counter=*/version_counter,
       /*allow_tensor_metadata_change=*/allow_tensor_metadata_change);
+      impl->dma_sizes = this->dma_sizes;
+      impl->dma_strides = this->dma_strides;
 
   return impl;
 }
