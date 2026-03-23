@@ -650,19 +650,19 @@ at::Tensor spyre_empty_with_layout(c10::IntArrayRef size,
 }
 
 at::Tensor& spyre_set_storage(at::Tensor& result, at::Storage storage,
-  int64_t storage_offset, c10::IntArrayRef size,
-  c10::IntArrayRef stride) {
-DEBUGINFO("set method");
-at::cpu::set_(result, storage, storage_offset, size, stride);
+                              int64_t storage_offset, c10::IntArrayRef size,
+                              c10::IntArrayRef stride) {
+  DEBUGINFO("set method");
+  at::cpu::set_(result, storage, storage_offset, size, stride);
 
-auto spyre_tensor_impl =
-static_cast<SpyreTensorImpl*>(result.unsafeGetTensorImpl());
-spyre_tensor_impl->dma_sizes = size.vec();
-spyre_tensor_impl->dma_strides = stride.vec();
-spyre_tensor_impl->spyre_layout.init(spyre_tensor_impl->dma_sizes,
-           result.scalar_type());
-DEBUGINFO("SpyreTensorLayout: ", spyre_tensor_impl->spyre_layout.toString());
-return result;
+  auto spyre_tensor_impl =
+      static_cast<SpyreTensorImpl*>(result.unsafeGetTensorImpl());
+  spyre_tensor_impl->dma_sizes = size.vec();
+  spyre_tensor_impl->dma_strides = stride.vec();
+  spyre_tensor_impl->spyre_layout.init(spyre_tensor_impl->dma_sizes,
+                                       result.scalar_type());
+  DEBUGINFO("SpyreTensorLayout: ", spyre_tensor_impl->spyre_layout.toString());
+  return result;
 }
 
 /**
@@ -690,9 +690,20 @@ at::Tensor spyre_copy_from(const at::Tensor& self, const at::Tensor& dst,
     } else {
       copy_host_to_device(self, dst);
     }
+     // DEBUG: check state after host→device copy
+     auto* spyre_impl = static_cast<SpyreTensorImpl*>(dst.unsafeGetTensorImpl());
+     DEBUGINFO("After host->device copy:");
+     DEBUGINFO("  dst dma_sizes size: ", spyre_impl->dma_sizes.size());
+     DEBUGINFO("  dst dma_strides size: ", spyre_impl->dma_strides.size());
+     DEBUGINFO("  dst spyre_layout: ", spyre_impl->spyre_layout.toString());
     return dst;
 
   } else if (self.is_privateuseone() && dst.is_cpu()) {
+    auto* spyre_impl = static_cast<SpyreTensorImpl*>(self.unsafeGetTensorImpl());
+    DEBUGINFO("Before device->host copy:");
+    DEBUGINFO("  src dma_sizes size: ", spyre_impl->dma_sizes.size());
+    DEBUGINFO("  src dma_strides size: ", spyre_impl->dma_strides.size());
+    DEBUGINFO("  src spyre_layout: ", spyre_impl->spyre_layout.toString());
     copy_device_to_host(self, dst);
     return dst;
 
