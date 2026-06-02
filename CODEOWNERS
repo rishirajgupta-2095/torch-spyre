@@ -39,10 +39,11 @@
 /tests/                  @avery-blanchard @moriohara @ashokponkumar @JRosenkranz @dgrove-oss @tardieu @ani300 @pradghos
 
 # Documentation
-/docs/                   @kaoutar55 @dgrove-oss
+/docs/                   @kaoutar55 @dgrove-oss @mudhakar @raghukiran1224 @viji560 @tehbone
 
 # CI/CD
 /.github/                 @ashokponkumar @jabostian
 /.pre-commit-config.yaml  @ashokponkumar @jabostian
 /pytest.ini               @ashokponkumar @jabostian
 /pytest_models.ini        @ashokponkumar @jabostian
+/Makefile                 @ashokponkumar @jabostian
