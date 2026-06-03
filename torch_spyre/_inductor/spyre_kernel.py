@@ -423,17 +423,14 @@ class SpyreKernel(Kernel[CSEVariable]):
         op_info: dict[str, Any],
     ) -> OpSpec:
         for arg in args:
-            if DtypeOpTable.is_dtype_op(op):
-                continue
-            elif arg.device_dtype == DataFormats.IEEE_FP32 and op not in SPYRE_FP32_OPS:
+            if not (
+                op in [IDENTITY_OP, RESTICKIFY_OP]
+                or DtypeOpTable.is_dtype_op(op)
+                or (op in SPYRE_FP32_OPS and arg.device_dtype == DataFormats.IEEE_FP32)
+                or arg.device_dtype == DataFormats.SEN169_FP16
+                or arg.device_dtype == DataFormats.SEN143_FP8  
+            ):
                 raise Unsupported(f"{op} on {arg.device_dtype}")
-            elif arg.device_dtype not in [
-                DataFormats.IEEE_FP32,
-                DataFormats.SEN169_FP16,
-                DataFormats.SEN143_FP8,
-                DataFormats.IEEE_INT32,
-            ]:
-                raise Unsupported(f"operation on {arg.device_dtype}")
 
         it_space = iteration_space(self.current_node)
 
@@ -492,6 +489,9 @@ class SpyreKernel(Kernel[CSEVariable]):
 
     def load(self, name: str, index: sympy.Expr):
         """Codegen a load from an InputBuffer"""
+        scheduler = getattr(V.graph, "scheduler", None)
+        if scheduler is not None:
+            name = scheduler.mutation_real_name.get(name, name)
         buf = V.graph.get_buffer(name)
         layout = buf.get_layout()
         if not isinstance(layout, FixedTiledLayout):
@@ -519,7 +519,11 @@ class SpyreKernel(Kernel[CSEVariable]):
         layout = buf.get_layout()
         if not isinstance(layout, FixedTiledLayout):
             raise Unsupported(f"{name} does not have FixedTiledLayout")
-        _ = self.args.output(name)
+        # Pool buffers are intermediates whose address is baked into the TensorArg
+        # allocation dict; registering them as outputs would overflow SEGMENT_OFFSETS.
+        # (lx buffers are already excluded from spyre_kernel_args in _tensor_arg.)
+        if "pool" not in layout.allocation:
+            _ = self.args.output(name)
         index = sympy_subs(index, V.graph.sizevars.precomputed_replacements)
         dst = TensorAccess(name, index, layout)
         real_dst_name = V.graph.scheduler.mutation_real_name.get(name, name)
@@ -575,7 +579,11 @@ class SpyreKernel(Kernel[CSEVariable]):
         layout = buf.get_layout()
         if not isinstance(layout, FixedTiledLayout):
             raise Unsupported(f"{name} does not have FixedTiledLayout")
-        _ = self.args.output(name)
+        # Pool buffers are intermediates whose address is baked into the TensorArg
+        # allocation dict; registering them as outputs would overflow SEGMENT_OFFSETS.
+        # (lx buffers are already excluded from spyre_kernel_args in _tensor_arg.)
+        if "pool" not in layout.allocation:
+            _ = self.args.output(name)
         index = sympy_subs(index, V.graph.sizevars.precomputed_replacements)
         dst = TensorAccess(name, index, layout)
         real_dst_name = V.graph.scheduler.mutation_real_name.get(name, name)
