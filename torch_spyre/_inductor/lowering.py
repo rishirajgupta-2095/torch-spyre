@@ -244,7 +244,6 @@ def lower_scaled_mm(
     out_dtype=None,
     use_fast_accum=False,
 ):
-
     if scale_a is not None:
         raise Unsupported("scale_a parameter in _scaled_mm is not yet supported")
     if scale_b is not None:
@@ -331,6 +330,8 @@ def lower_scaled_mm(
         )
 
     return result
+
+
 def eager_fallback(op, *args, **kwargs):
     handler = lowering.fallback_handler(op, add_to_fallback_set=False)
     return handler(*args, **kwargs)
