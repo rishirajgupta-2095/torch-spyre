@@ -21,7 +21,6 @@ Tests cover:
 - dequantize_fp8_with_scale: FP8→FP16 dequantization with scale
 """
 
-import pytest
 import torch
 
 from utils_inductor import (
