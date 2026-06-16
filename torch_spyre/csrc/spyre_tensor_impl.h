@@ -45,6 +45,8 @@ enum class ElementArrangement {
                  // operations
   EXX2,          // reduction mode: two values per stick (vs. one for standard
                  // reductions)
+  QFP8WT,        // 2D-stick weight quantization (qfp8wt): stick occupies two
+                 // device dimensions [2, 64]
 };
 
 class SpyreTensorLayout {

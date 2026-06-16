@@ -1148,3 +1148,29 @@ def lower_minimum(x, y):
 )
 def lower_maximum(x, y):
     return with_int64_fallback(lowering.maximum, x, y)
+
+
+@register_spyre_lowering(torch.ops.spyre.qfp8wt)
+def lower_qfp8wt(x):
+    """
+    Lower qfp8wt operation - weight FP8 format conversion with 2D stick layout.
+    Pointwise format conversion only (no scaling).
+    """
+    x.realize()
+
+    fn = lowering.ops_wrapper(torch.ops.spyre.qfp8wt.__name__)
+    x_loader = x.make_loader()
+
+    def inner_fn(index):
+        return fn(x_loader(index))
+
+    pw = Pointwise.create(
+        device=x.get_device(),
+        dtype=torch.float8_e4m3fn,
+        inner_fn=inner_fn,
+        ranges=x.get_size(),
+        origin_node=x.get_origin_node(),
+        traceback=x.get_traceback(),
+    )
+    pw.realize()
+    return pw
