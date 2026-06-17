@@ -29,7 +29,6 @@ from torch_spyre._inductor.constants import (
     MATMUL_LAYOUT_LABELS,
     RESTICKIFY_OP,
     TOPK_OPS,
-    BATCH_MATMUL_FP8_OP,
 )
 from torch_spyre._inductor import config as _spyre_config
 from torch_spyre._inductor.logging_utils import get_inductor_logger
@@ -334,14 +333,11 @@ def _create_sdsc_tensors(
     dims = list(iteration_space.keys())
     layouts: dict = {}
     use_op_dims = not _is_matmul(op_spec.op)
-    is_fp8_matmul = op_spec.op in (BATCH_MATMUL_FP8_OP)
 
     missing_dim = None
     sdsc_args: list[SDSCArgs] = []
     for arg in op_spec.args:
-        is_fp8_mm_kernel_arg = (
-            is_fp8_matmul and arg.element_arrangement == ElementArrangement.QFP8WT
-        )
+        is_fp8_mm_kernel_arg = arg.element_arrangement == ElementArrangement.QFP8WT
         dim_order, stick_dim = _get_device_dim_order(arg, symbol_mapping)
         scales: dict = {}
         strides: dict = {}

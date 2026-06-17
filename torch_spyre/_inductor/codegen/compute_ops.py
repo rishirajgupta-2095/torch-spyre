@@ -184,7 +184,7 @@ def gen_coord_info_value(
                 ],
             },
         }
-    elif is_stick_dim and is_fp8_stick and stick_idx == 1:
+    elif is_stick_dim and is_fp8_stick and not (stick_idx == 0):
         return {
             "spatial": 3,
             "temporal": 0,
@@ -204,7 +204,7 @@ def gen_coord_info_value(
                     {"factor_": 1, "label_": "corelet_fold"},
                     {"factor_": 1, "label_": "row_fold"},
                     {"factor_": 64, "label_": "elem_arr_2"},
-                    {"factor_": other_stick_size, "label_": "elem_arr_1"},
+                    {"factor_": 2, "label_": "elem_arr_1"},
                     {"factor_": 1, "label_": "elem_arr_0"},
                 ],
             },
@@ -231,7 +231,7 @@ def gen_coord_info_value(
                     {"factor_": 1, "label_": "row_fold"},
                     {"factor_": (size // 128), "label_": "elem_arr_3"},
                     {"factor_": 8, "label_": "elem_arr_2"},
-                    {"factor_": other_stick_size, "label_": "elem_arr_1"},
+                    {"factor_": 2, "label_": "elem_arr_1"},
                     {"factor_": 8, "label_": "elem_arr_0"},
                 ],
             },

@@ -815,7 +815,7 @@ def where_scalar_decomp(condition, self, other):
 def spyre_quantize_weight_fp8_with_scale(
     input: torch.Tensor, scale: torch.Tensor
 ) -> torch.Tensor:
-    inv_scale = torch.ops.spyre.reciprocal(scale)
+    inv_scale = torch.reciprocal(scale)
     x_scaled = input * inv_scale
     x_clamped = torch.ops.spyre.clamp(x_scaled, -448.0, 448.0)
     return torch.ops.spyre.qfp8wt(x_clamped)
