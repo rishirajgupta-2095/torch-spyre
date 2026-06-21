@@ -239,6 +239,66 @@ def _patch_tensor_for_spyre():
     # preventing incorrect disk cache hits across process boundaries.
     # ──────────────────────────────────────────────────────────────────────────
     _patch_fx_graph_hash()
+    _patch_scaled_mm_meta_for_3d()
+
+
+def _patch_scaled_mm_meta_for_3d():
+    """
+    Extend _check_scaled_mm_sizes to accept 3D×2D inputs for Spyre.
+
+    PyTorch's built-in meta registration for aten._scaled_mm enforces that
+    both inputs are 2D. Spyre handles 3D×2D via flatten_3d_scaled_mm_pass
+    (view → 2D _scaled_mm → view), but Dynamo's FakeTensor shape propagation
+    runs before that graph pass. Without this patch, Dynamo raises:
+      "Inputs must be 2D but got self.dim()=3 and mat2.dim()=2"
+
+    We intercept _check_scaled_mm_sizes (called by meta_scaled_mm) and
+    return the correct output shape [B, M, N] for the 3D×2D case, then
+    delegate everything else to the original implementation.
+    """
+    import torch
+    import torch._meta_registrations as meta_reg
+
+    if getattr(meta_reg, "_spyre_scaled_mm_3d_patched", False):
+        return
+
+    _orig_check = meta_reg._check_scaled_mm_sizes
+
+    def _patched_check_scaled_mm_sizes(
+        self,
+        mat2,
+        scale_a,
+        scale_b,
+        bias=None,
+        scale_result=None,
+        out_dtype=None,
+        use_fast_accum=False,
+    ):
+        if self.dim() == 3 and mat2.dim() == 2:
+            B, M, K = self.shape
+            K2, N = mat2.shape
+            torch._check(
+                K == K2,
+                lambda: (
+                    f"Incompatible shapes for 3D×2D _scaled_mm: "
+                    f"{list(self.shape)} @ {list(mat2.shape)}"
+                ),
+            )
+            output_dtype = out_dtype if out_dtype is not None else self.dtype
+            return self.new_empty((B, M, N), dtype=output_dtype)
+        return _orig_check(
+            self,
+            mat2,
+            scale_a,
+            scale_b,
+            bias,
+            scale_result,
+            out_dtype,
+            use_fast_accum,
+        )
+
+    meta_reg._check_scaled_mm_sizes = _patched_check_scaled_mm_sizes
+    meta_reg._spyre_scaled_mm_3d_patched = True
 
 
 def _patch_fx_graph_hash():
