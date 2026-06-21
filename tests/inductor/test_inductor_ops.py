@@ -4119,6 +4119,12 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     torch.tensor([1.0], dtype=torch.float16),
                     torch.tensor([1.0], dtype=torch.float16),
                 ),
+                "3d_2x128x128": (
+                    torch.rand((2, 128, 128), dtype=torch.float16),
+                    torch.rand((128, 128), dtype=torch.float16),
+                    torch.tensor([1.0], dtype=torch.float16),
+                    torch.tensor([1.0], dtype=torch.float16),
+                ),
             },
         },
     }
