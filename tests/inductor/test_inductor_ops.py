@@ -30,7 +30,6 @@ from utils_inductor import (
 import utils_inductor
 from torch_spyre._inductor.dtype_ops import DtypeOpTable
 from torch_spyre._inductor.constants import IDENTITY_OP
-from torch_spyre._inductor import spyre_hint
 
 POINTWISE_UNARY_OPS_DICT = {
     "abs": torch.abs,
@@ -5757,17 +5756,6 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         def spyre_fn(a, b, scale_a, scale_b):
             q_a = torch.ops.spyre.quantize_fp8_with_scale(a, scale_a)
             q_b = torch.ops.spyre.quantize_weight_fp8_with_scale(b, scale_b)
-            # EXPERIMENT: for large-K shapes, force a K-split across cores so the
-            # per-core reduction (K/2) fits and the existing k_fast/PSUM-ring
-            # path handles the reduction. Guarded to large shapes only: a blanket
-            # hint would fail _apply_user_hint's divisibility check on the small
-            # param sets (e.g. N=128). N=16 x K=2 = 32 cores.
-            k_dim = a.shape[-1]
-            if k_dim >= 4096:
-                with spyre_hint(work_div={"N": 16, "K": 2}):
-                    return torch.ops.aten._scaled_mm(
-                        q_a, q_b, scale_a, scale_b, bias=None, out_dtype=torch.float16
-                    )
             return torch.ops.aten._scaled_mm(
                 q_a, q_b, scale_a, scale_b, bias=None, out_dtype=torch.float16
             )
