@@ -200,11 +200,15 @@ def gen_coord_info_value(
         # for larger N/K, which the DSC rejects with
         # "distributeElemArrToTemporalLoops: Not enough elements to distribute".
         #
-        # ``size`` here is already the per-slice (per-core) extent: the caller
-        # passes iteration_space[dim] // work_slices[dim]. So the elemArr must
-        # describe exactly ``size`` elements, matching every other branch
-        # (elemArr total == size). With the 8x8 inner stick, the per-core stick
-        # count is size // 64.
+        # ``size`` here is the per-core extent on the 64-element stick side: the
+        # caller passes iteration_space[dim] // work_slices[dim]. The inner
+        # elemArr describes the per-core out footprint as elem_arr_2 (stick
+        # count = size // 64) x 8 x 8, so its total equals ``size``. The
+        # core-fold stride must also equal ``size`` so consecutive cores tile
+        # the dimension contiguously (core_fold * size == N), matching the
+        # OUTPUT fold in the same kernel. Using size * other_stick_size here
+        # double-strides and makes the weight loop span 2*N, which the DSC
+        # rejects ("Loop split needed").
         sticks_per_core = max(size // 64, 1)
         return {
             "spatial": 3,
