@@ -4131,6 +4131,31 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     torch.tensor([1.0], dtype=torch.float16),
                     torch.tensor([1.0], dtype=torch.float16),
                 ),
+                # M-sweep at N=K=4096 to map where the K-split path is correct.
+                "1x4096x4096": (
+                    torch.rand((1, 4096), dtype=torch.float16),
+                    torch.rand((4096, 4096), dtype=torch.float16),
+                    torch.tensor([1.0], dtype=torch.float16),
+                    torch.tensor([1.0], dtype=torch.float16),
+                ),
+                "8x4096x4096": (
+                    torch.rand((8, 4096), dtype=torch.float16),
+                    torch.rand((4096, 4096), dtype=torch.float16),
+                    torch.tensor([1.0], dtype=torch.float16),
+                    torch.tensor([1.0], dtype=torch.float16),
+                ),
+                "16x4096x4096": (
+                    torch.rand((16, 4096), dtype=torch.float16),
+                    torch.rand((4096, 4096), dtype=torch.float16),
+                    torch.tensor([1.0], dtype=torch.float16),
+                    torch.tensor([1.0], dtype=torch.float16),
+                ),
+                "32x4096x4096": (
+                    torch.rand((32, 4096), dtype=torch.float16),
+                    torch.rand((4096, 4096), dtype=torch.float16),
+                    torch.tensor([1.0], dtype=torch.float16),
+                    torch.tensor([1.0], dtype=torch.float16),
+                ),
             },
         },
     }
