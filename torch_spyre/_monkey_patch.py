@@ -244,8 +244,7 @@ def _patch_tensor_for_spyre():
 
 def _patch_scaled_mm_meta_for_3d():
     """
-    Allow aten._scaled_mm's meta/FakeTensor shape propagation to accept
-    3D×2D inputs for Spyre.
+    Extend _check_scaled_mm_sizes to accept 3D×2D inputs for Spyre.
 
     PyTorch's built-in meta registration for aten._scaled_mm enforces that
     both inputs are 2D. Spyre handles 3D×2D via flatten_3d_scaled_mm_pass
@@ -254,17 +253,11 @@ def _patch_scaled_mm_meta_for_3d():
     3D input with:
       "Inputs must be 2D but got self.dim()=3 and mat2.dim()=2"
 
-    Depending on the torch version the 2D check lives in one of two places:
-      * newer torch: a helper ``_check_scaled_mm_sizes`` that both validates
-        and returns the output shape (called at the end of meta_scaled_mm).
-      * older torch: inline inside ``meta_scaled_mm`` itself.
-
-    We wrap whichever exists. The wrapper is intentionally signature-agnostic
-    (``*args, **kwargs``): the only things we rely on are that ``self`` and
-    ``mat2`` are the first two positional args and that ``out_dtype`` (if any)
-    is passed positionally in the documented slot or by keyword. For the
-    3D×2D case we synthesize the meta output ``[B, M, N]``; everything else
-    delegates unchanged to the original implementation.
+    meta_scaled_mm delegates the size check (and output-shape computation) to
+    the module-level _check_scaled_mm_sizes, looked up as a global at call
+    time. We replace that global with a wrapper that returns the correct
+    output shape [B, M, N] for the 3D×2D case and delegates everything else
+    to the original implementation.
     """
     import torch
     import torch._meta_registrations as meta_reg
@@ -272,59 +265,42 @@ def _patch_scaled_mm_meta_for_3d():
     if getattr(meta_reg, "_spyre_scaled_mm_3d_patched", False):
         return
 
-    def _make_3d_aware(orig, out_dtype_pos):
-        def wrapper(*args, **kwargs):
-            mat1 = args[0] if args else kwargs.get("self")
-            mat2 = args[1] if len(args) > 1 else kwargs.get("mat2")
-            if (
-                isinstance(mat1, torch.Tensor)
-                and isinstance(mat2, torch.Tensor)
-                and mat1.dim() == 3
-                and mat2.dim() == 2
-            ):
-                B, M, K = mat1.shape
-                K2, N = mat2.shape
-                torch._check(
-                    K == K2,
-                    lambda: (
-                        f"Incompatible shapes for 3D×2D _scaled_mm: "
-                        f"{list(mat1.shape)} @ {list(mat2.shape)}"
-                    ),
-                )
-                out_dtype = kwargs.get("out_dtype")
-                if out_dtype is None and len(args) > out_dtype_pos:
-                    out_dtype = args[out_dtype_pos]
-                dtype = out_dtype if out_dtype is not None else mat1.dtype
-                return mat1.new_empty((B, M, N), dtype=dtype)
-            return orig(*args, **kwargs)
+    _orig_check = meta_reg._check_scaled_mm_sizes
 
-        return wrapper
-
-    # meta_scaled_mm / _check_scaled_mm_sizes share the same positional
-    # layout: (self, mat2, scale_a, scale_b, bias, scale_result, out_dtype,
-    # use_fast_accum), so out_dtype is positional index 6 in both.
-    patched_any = False
-    if hasattr(meta_reg, "_check_scaled_mm_sizes"):
-        meta_reg._check_scaled_mm_sizes = _make_3d_aware(
-            meta_reg._check_scaled_mm_sizes, out_dtype_pos=6
-        )
-        patched_any = True
-    if hasattr(meta_reg, "meta_scaled_mm"):
-        meta_reg.meta_scaled_mm = _make_3d_aware(
-            meta_reg.meta_scaled_mm, out_dtype_pos=6
-        )
-        patched_any = True
-
-    if not patched_any:
-        import warnings
-
-        warnings.warn(
-            "torch_spyre: could not find meta_scaled_mm or "
-            "_check_scaled_mm_sizes to patch for 3D×2D _scaled_mm support; "
-            "compiling 3D×2D _scaled_mm will fail during Dynamo tracing.",
-            stacklevel=2,
+    def _patched_check_scaled_mm_sizes(
+        self,
+        mat2,
+        scale_a,
+        scale_b,
+        bias=None,
+        scale_result=None,
+        out_dtype=None,
+        use_fast_accum=False,
+    ):
+        if self.dim() == 3 and mat2.dim() == 2:
+            B, M, K = self.shape
+            K2, N = mat2.shape
+            torch._check(
+                K == K2,
+                lambda: (
+                    f"Incompatible shapes for 3D×2D _scaled_mm: "
+                    f"{list(self.shape)} @ {list(mat2.shape)}"
+                ),
+            )
+            output_dtype = out_dtype if out_dtype is not None else self.dtype
+            return self.new_empty((B, M, N), dtype=output_dtype)
+        return _orig_check(
+            self,
+            mat2,
+            scale_a,
+            scale_b,
+            bias,
+            scale_result,
+            out_dtype,
+            use_fast_accum,
         )
 
+    meta_reg._check_scaled_mm_sizes = _patched_check_scaled_mm_sizes
     meta_reg._spyre_scaled_mm_3d_patched = True
 
 
