@@ -5763,7 +5763,11 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         def pytorch_fn(a, b, scale_a, scale_b):
             q_a = (a / scale_a).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
             q_b = (b / scale_b).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
-            return (q_a @ q_b).to(torch.float16) * (scale_a * scale_b)
+            # Accumulate in higher precision, matching fp8 GEMM semantics (and
+            # Spyre). A raw fp8 @ fp8 accumulates/saturates in fp8 (max 448), so
+            # for large K the sum overflows to inf/NaN.
+            out = q_a.to(torch.float32) @ q_b.to(torch.float32)
+            return out.to(torch.float16) * (scale_a * scale_b)
 
         compare_with_pytorch(
             spyre_fn, pytorch_fn, a, b, scale_a, scale_b, atol=0.1, rtol=0.1
