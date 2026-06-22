@@ -16,6 +16,7 @@ import pytest
 import unittest
 import torch
 
+
 from utils_inductor import (
     ParameterizedTestMeta,
     _compile_and_run,
@@ -319,6 +320,48 @@ TO_DTYPE_OP_ROUND_TRIP_EXPECT_FAIL = [
     f"{_dtype_name(src)}_to_{_dtype_name(dst)}_{shapes2key((shape,))}"
     for src, dst in [(torch.float16, torch.float32)]
     for shape in TO_DTYPE_OP_SHAPES_UNALIGNED
+]
+
+# M x K x N -> [M, K] @ [K, N]
+_SCALED_MM_SHAPES_SUPPORTED = [
+    (128, 128, 128),
+    (2, 128, 100),
+    (2, 128, 128),
+    (2, 4096, 4096),
+    (3, 128, 128),
+    (4, 128, 1024),
+    (4, 4096, 4096),
+]
+
+_SCALED_MM_SHAPES_UNSUPPORTED = [
+    (1, 4096, 4096),
+    (2, 100, 128),
+    (5, 200, 300),
+]
+
+_SCALED_MM_SHAPES = _SCALED_MM_SHAPES_SUPPORTED + _SCALED_MM_SHAPES_UNSUPPORTED
+
+# scale_a, scale_b, bias
+_SCALED_MM_PARAMS = [
+    (1.0, 1.0, 0.0),
+]
+
+SCALED_MM_TESTS = {
+    f"{shapes2key([shape])}_{sa}_{sb}_{b}": (
+        torch.rand((shape[0], shape[1]), dtype=torch.float16),
+        torch.rand((shape[1], shape[2]), dtype=torch.float16),
+        torch.tensor(sa, dtype=torch.float16),
+        torch.tensor(sb, dtype=torch.float16),
+        torch.tensor(b, dtype=torch.float16),
+    )
+    for shape in _SCALED_MM_SHAPES
+    for sa, sb, b in _SCALED_MM_PARAMS
+}
+
+SCALED_MM_TESTS_EXPECT_FAIL = [
+    f"{shapes2key([shape])}_{sa}_{sb}_{b}"
+    for shape in _SCALED_MM_SHAPES_UNSUPPORTED
+    for sa, sb, b in _SCALED_MM_PARAMS
 ]
 
 FP32_EPS = torch.finfo(torch.float32).eps  # 1.1920928955078125e-07
@@ -4121,54 +4164,9 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "4d_dim3": (3, cached_randn((2, 4, 8, 64))),
             },
         },
-        (
-            "test_fp8_scaled_mm",
-            "test_fp8_scaled_mm_cpu",
-        ): {
-            "param_sets": {
-                "2x128x128": (
-                    torch.rand((2, 128), dtype=torch.float16),
-                    torch.rand((128, 128), dtype=torch.float16),
-                    torch.tensor([1.0], dtype=torch.float16),
-                    torch.tensor([1.0], dtype=torch.float16),
-                ),
-                "128x128x128": (
-                    torch.rand((128, 128), dtype=torch.float16),
-                    torch.rand((128, 128), dtype=torch.float16),
-                    torch.tensor([1.0], dtype=torch.float16),
-                    torch.tensor([1.0], dtype=torch.float16),
-                ),
-                "4x128x1024": (
-                    torch.rand((4, 128), dtype=torch.float16),
-                    torch.rand((128, 1024), dtype=torch.float16),
-                    torch.tensor([1.0], dtype=torch.float16),
-                    torch.tensor([1.0], dtype=torch.float16),
-                ),
-                "3x128x128": (
-                    torch.rand((3, 128), dtype=torch.float16),
-                    torch.rand((128, 128), dtype=torch.float16),
-                    torch.tensor([1.0], dtype=torch.float16),
-                    torch.tensor([1.0], dtype=torch.float16),
-                ),
-                "2x100x128": (
-                    torch.rand((2, 100), dtype=torch.float16),
-                    torch.rand((100, 128), dtype=torch.float16),
-                    torch.tensor([1.0], dtype=torch.float16),
-                    torch.tensor([1.0], dtype=torch.float16),
-                ),
-                "2x128x100": (
-                    torch.rand((2, 128), dtype=torch.float16),
-                    torch.rand((128, 100), dtype=torch.float16),
-                    torch.tensor([1.0], dtype=torch.float16),
-                    torch.tensor([1.0], dtype=torch.float16),
-                ),
-                "5x200x300": (
-                    torch.rand((5, 200), dtype=torch.float16),
-                    torch.rand((200, 300), dtype=torch.float16),
-                    torch.tensor([1.0], dtype=torch.float16),
-                    torch.tensor([1.0], dtype=torch.float16),
-                ),
-            },
+        ("test_fp8_scaled_mm", "test_fp8_scaled_mm_cpu"): {
+            "param_sets": SCALED_MM_TESTS,
+            "expect_fail": SCALED_MM_TESTS_EXPECT_FAIL,
         },
     }
 
@@ -5834,23 +5832,23 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             run_eager=False,
         )
 
-    def test_fp8_scaled_mm_cpu(self, a, b, scale_a, scale_b):
+    def test_fp8_scaled_mm_cpu(self, a, b, scale_a, scale_b, bias):
         """Test _scaled_mm with FP8 inputs."""
 
-        def spyre_fn(a, b, scale_a, scale_b):
+        def spyre_fn(a, b, scale_a, scale_b, bias):
             q_a = torch.ops.spyre.quantize_fp8_with_scale(a, scale_a)
             q_b = torch.ops.spyre.quantize_weight_fp8_with_scale(b, scale_b)
             return torch.ops.aten._scaled_mm(
-                q_a, q_b, scale_a, scale_b, bias=None, out_dtype=torch.float16
+                q_a, q_b, scale_a, scale_b, bias=bias, out_dtype=torch.float16
             )
 
-        def pytorch_fn(a, b, scale_a, scale_b):
+        def pytorch_fn(a, b, scale_a, scale_b, bias=None):
             q_a = (a / scale_a).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
             q_b = (b / scale_b).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
-            return (q_a @ q_b).to(torch.float16) * (scale_a * scale_b)
+            return (q_a @ q_b).to(torch.float16) * (scale_a * scale_b) + bias
 
         compare_with_pytorch(
-            spyre_fn, pytorch_fn, a, b, scale_a, scale_b, atol=0.1, rtol=0.1
+            spyre_fn, pytorch_fn, a, b, scale_a, scale_b, bias, atol=0.1, rtol=0.1
         )
 
     def test_is_nonzero_cpu(self, *args):

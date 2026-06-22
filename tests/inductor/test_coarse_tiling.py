@@ -1156,7 +1156,9 @@ class TestGenerateSdscTiledSymbols(unittest.TestCase):
             work_slices={s: 2},
             core_id_to_work_slice={s: core_id},
             padding={},
-            layouts={"A": {"dim_order": [s], "stick_dim_order": [s], "stick_size": [64]}},
+            layouts={
+                "A": {"dim_order": [s], "stick_dim_order": [s], "stick_size": [64]}
+            },
             args=[tensor],
             constants={},
             coordinate_masking={},
@@ -3040,7 +3042,9 @@ class TestSymbolKind(unittest.TestCase):
             work_slices={s: 2},
             core_id_to_work_slice={s: Mod(core_id, 2)},
             padding={},
-            layouts={"A": {"dim_order": [s], "stick_dim_order": [s], "stick_size": [64]}},
+            layouts={
+                "A": {"dim_order": [s], "stick_dim_order": [s], "stick_size": [64]}
+            },
             args=[tensor],
             constants={},
             coordinate_masking={},
