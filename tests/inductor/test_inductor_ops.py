@@ -660,6 +660,13 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     cached_randn((2, 2, 2048, 2048)),
                     cached_xavier((2, 2, 2048, 65536)),
                 ),
+                # fp16 at the same shape as the failing FP8 case (M=4, K=4096,
+                # N=4096): tests whether large-K hits the per-issue reduction
+                # limit (6346) regardless of dtype, or whether it is FP8-specific.
+                "2d_M4_K4096_N4096": (
+                    cached_randn((4, 4096)),
+                    cached_xavier((4096, 4096)),
+                ),
             },
         },
         ("test_max_sub_broadcast", "test_max_sub_broadcast"): {
