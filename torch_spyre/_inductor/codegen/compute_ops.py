@@ -185,6 +185,12 @@ def gen_coord_info_value(
             },
         }
     elif is_stick_dim and is_fp8_stick and not (stick_idx == 0):
+        # ``size`` is the per-core extent on the 64-element stick side. The inner
+        # elemArr describes one 64-element stick as 8x8, scaled by elem_arr_2 =
+        # size // 64 so the elemArr total equals ``size`` (the original fixed
+        # 64x2 = 128 only covered the dim when size == 128, which is why small
+        # FP8 matmuls passed but large N failed with "not enough elements").
+        sticks_per_core = max(size // 64, 1)
         return {
             "spatial": 3,
             "temporal": 0,
@@ -195,7 +201,7 @@ def gen_coord_info_value(
                     {"Affine": {"alpha_": size, "beta_": 0}},
                     {"Affine": {"alpha_": 0, "beta_": 0}},
                     {"Affine": {"alpha_": 0, "beta_": 0}},
-                    {"Affine": {"alpha_": (size // 8), "beta_": 0}},
+                    {"Affine": {"alpha_": 64, "beta_": 0}},
                     {"Affine": {"alpha_": 8, "beta_": 0}},
                     {"Affine": {"alpha_": 1, "beta_": 0}},
                 ],
@@ -203,9 +209,9 @@ def gen_coord_info_value(
                     {"factor_": nsplits, "label_": "core_fold"},
                     {"factor_": 1, "label_": "corelet_fold"},
                     {"factor_": 1, "label_": "row_fold"},
-                    {"factor_": 64, "label_": "elem_arr_2"},
-                    {"factor_": 2, "label_": "elem_arr_1"},
-                    {"factor_": 1, "label_": "elem_arr_0"},
+                    {"factor_": sticks_per_core, "label_": "elem_arr_2"},
+                    {"factor_": 8, "label_": "elem_arr_1"},
+                    {"factor_": 8, "label_": "elem_arr_0"},
                 ],
             },
         }

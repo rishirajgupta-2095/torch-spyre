@@ -30,6 +30,7 @@ from utils_inductor import (
 import utils_inductor
 from torch_spyre._inductor.dtype_ops import DtypeOpTable
 from torch_spyre._inductor.constants import IDENTITY_OP
+from torch_spyre._inductor import spyre_hint
 
 POINTWISE_UNARY_OPS_DICT = {
     "abs": torch.abs,
@@ -5751,6 +5752,17 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         def spyre_fn(a, b, scale_a, scale_b):
             q_a = torch.ops.spyre.quantize_fp8_with_scale(a, scale_a)
             q_b = torch.ops.spyre.quantize_weight_fp8_with_scale(b, scale_b)
+            # EXPERIMENT: for large K, coarse-tile the reduction (K) into a loop
+            # via the existing tiles/LoopSpec machinery. Each tile is a small-K
+            # matmul accumulated across iterations on one core -- no cross-core
+            # K-split, so no PSUM/addressing race. tiles={"K": 2} -> per-tile
+            # K=2048; bump the divisor if a tile is still too deep (6346).
+            k_dim = a.shape[-1]
+            if k_dim >= 4096:
+                with spyre_hint(tiles={"K": 2}):
+                    return torch.ops.aten._scaled_mm(
+                        q_a, q_b, scale_a, scale_b, bias=None, out_dtype=torch.float16
+                    )
             return torch.ops.aten._scaled_mm(
                 q_a, q_b, scale_a, scale_b, bias=None, out_dtype=torch.float16
             )
