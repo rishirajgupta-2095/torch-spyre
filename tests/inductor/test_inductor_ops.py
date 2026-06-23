@@ -4125,6 +4125,41 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     torch.tensor([1.0], dtype=torch.float16),
                     torch.tensor([1.0], dtype=torch.float16),
                 ),
+                # B=4, M=64, K=256, N=128 (non-square contraction)
+                "3d_4x64x256": (
+                    torch.rand((4, 64, 256), dtype=torch.float16),
+                    torch.rand((256, 128), dtype=torch.float16),
+                    torch.tensor([1.0], dtype=torch.float16),
+                    torch.tensor([1.0], dtype=torch.float16),
+                ),
+                # B=8, M=32, K=128, N=256 (large batch, small M)
+                "3d_8x32x128": (
+                    torch.rand((8, 32, 128), dtype=torch.float16),
+                    torch.rand((128, 256), dtype=torch.float16),
+                    torch.tensor([1.0], dtype=torch.float16),
+                    torch.tensor([1.0], dtype=torch.float16),
+                ),
+                # B=1, M=256, K=512, N=128 (batch-1 edge case)
+                "3d_1x256x512": (
+                    torch.rand((1, 256, 512), dtype=torch.float16),
+                    torch.rand((512, 128), dtype=torch.float16),
+                    torch.tensor([1.0], dtype=torch.float16),
+                    torch.tensor([1.0], dtype=torch.float16),
+                ),
+                # B=2, M=128, K=256, N=1024 (wide output, Granite-like)
+                "3d_2x128x256_n1024": (
+                    torch.rand((2, 128, 256), dtype=torch.float16),
+                    torch.rand((256, 1024), dtype=torch.float16),
+                    torch.tensor([1.0], dtype=torch.float16),
+                    torch.tensor([1.0], dtype=torch.float16),
+                ),
+                # non-unit scales, exercises scale propagation on 3D path
+                "3d_2x128x128_scaled": (
+                    torch.rand((2, 128, 128), dtype=torch.float16),
+                    torch.rand((128, 128), dtype=torch.float16),
+                    torch.tensor([0.5], dtype=torch.float16),
+                    torch.tensor([2.0], dtype=torch.float16),
+                ),
             },
         },
     }

@@ -82,6 +82,27 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     torch.tensor([1.0], dtype=torch.float16).to("spyre"),
                     torch.tensor([1.0], dtype=torch.float16).to("spyre"),
                 ),
+                # non-square contraction: [4,64,256] @ [256,128]
+                "4x64x256": (
+                    cached_randn((4, 64, 256), dtype=torch.float16).to("spyre"),
+                    cached_randn((256, 128), dtype=torch.float16).to("spyre"),
+                    torch.tensor([1.0], dtype=torch.float16).to("spyre"),
+                    torch.tensor([1.0], dtype=torch.float16).to("spyre"),
+                ),
+                # batch-1 edge case: [1,256,512] @ [512,128]
+                "1x256x512": (
+                    cached_randn((1, 256, 512), dtype=torch.float16).to("spyre"),
+                    cached_randn((512, 128), dtype=torch.float16).to("spyre"),
+                    torch.tensor([1.0], dtype=torch.float16).to("spyre"),
+                    torch.tensor([1.0], dtype=torch.float16).to("spyre"),
+                ),
+                # wide output: [2,128,256] @ [256,1024]
+                "2x128x256_n1024": (
+                    cached_randn((2, 128, 256), dtype=torch.float16).to("spyre"),
+                    cached_randn((256, 1024), dtype=torch.float16).to("spyre"),
+                    torch.tensor([1.0], dtype=torch.float16).to("spyre"),
+                    torch.tensor([1.0], dtype=torch.float16).to("spyre"),
+                ),
             },
         },
         (
@@ -223,7 +244,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         torch.compiler.reset()
         backend = InductorAndRecordGraphs()
         cmp = torch.compile(spyre_fn, backend=backend)
-        cmp(a, b, scale_a, scale_b)
+        out = cmp(a, b, scale_a, scale_b)
 
         graph_str = normalize_gm(
             backend.inductor_graphs[0].print_readable(print_output=False)
@@ -235,6 +256,13 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         )
         assert graph_str.count("aten.view") >= 2, (
             "Expected at least two aten.view nodes (flatten + unflatten) around _scaled_mm"
+        )
+
+        # The unflatten must restore the original [B, M, N] shape.
+        B, M, _K = a.shape
+        N = b.shape[1]
+        assert tuple(out.shape) == (B, M, N), (
+            f"Expected output shape {(B, M, N)} after unflatten, got {tuple(out.shape)}"
         )
 
     def test_mixed_device_seq(self):
