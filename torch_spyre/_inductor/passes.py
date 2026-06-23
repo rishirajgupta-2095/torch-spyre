@@ -40,6 +40,7 @@ from .logging_utils import get_inductor_logger
 from .padding import insert_bmm_padding
 from .temp_passes import (
     bmm_unflatten_pass,
+    flatten_3d_scaled_mm_pass,
     mark_direct_unit_bmm_pass,
     mm_to_bmm_pass,
 )
@@ -211,6 +212,7 @@ class CustomPostPasses(_SpyreGraphPassPipeline):
                 mm_to_bmm_pass.apply,
                 mark_direct_unit_bmm_pass,
                 bmm_unflatten_pass.apply,
+                flatten_3d_scaled_mm_pass,
             ]
         )
 

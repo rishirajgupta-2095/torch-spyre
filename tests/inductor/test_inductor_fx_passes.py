@@ -72,6 +72,32 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             },
         },
         (
+            "test_flatten_3d_scaled_mm_pass_graph",
+            "test_flatten_3d_scaled_mm_pass_graph",
+        ): {
+            "param_sets": {
+                "2x128x128": (
+                    cached_randn((2, 128, 128), dtype=torch.float16).to("spyre"),
+                    cached_randn((128, 128), dtype=torch.float16).to("spyre"),
+                    torch.tensor([1.0], dtype=torch.float16).to("spyre"),
+                    torch.tensor([1.0], dtype=torch.float16).to("spyre"),
+                ),
+            },
+        },
+        (
+            "test_flatten_3d_scaled_mm_pass_graph",
+            "test_flatten_3d_scaled_mm_pass_graph",
+        ): {
+            "param_sets": {
+                "2x128x128": (
+                    cached_randn((2, 128, 128), dtype=torch.float16).to("spyre"),
+                    cached_randn((128, 128), dtype=torch.float16).to("spyre"),
+                    torch.tensor([1.0], dtype=torch.float16).to("spyre"),
+                    torch.tensor([1.0], dtype=torch.float16).to("spyre"),
+                ),
+            },
+        },
+        (
             "test_unflatten_bmm_pass_graph",
             "test_unflatten_bmm_pass_graph",
         ): {
@@ -178,7 +204,95 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         assert "aten.mm.default" not in inductor_graph_str, (
             "aten.mm.default should be replaced by bmm/batched_matmul after passes"
         )
+        @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
+    @pytest.mark.filterwarnings("ignore::UserWarning")
+    def test_flatten_3d_scaled_mm_pass_graph(
+        self,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        scale_a: torch.Tensor,
+        scale_b: torch.Tensor,
+    ):
+        """
+        Verify flatten_3d_scaled_mm_pass rewrites _scaled_mm([B,M,K],[K,N])
+        to view([B,M,K]->[B*M,K]) + _scaled_mm([B*M,K],[K,N]) + view([B*M,N]->[B,M,N]).
 
+        After the pass the Inductor graph must not contain a 3D _scaled_mm: it
+        must contain exactly two aten.view nodes wrapping a 2D _scaled_mm.
+        """
+        from torch._dynamo.testing import InductorAndRecordGraphs, normalize_gm
+        import torch._inductor.config as config
+
+        config.force_disable_caches = True
+
+        def spyre_fn(a, b, scale_a, scale_b):
+            q_a = torch.ops.spyre.quantize_fp8_with_scale(a, scale_a)
+            q_b = torch.ops.spyre.quantize_weight_fp8_with_scale(b, scale_b)
+            return torch.ops.aten._scaled_mm(
+                q_a, q_b, scale_a, scale_b, bias=None, out_dtype=torch.float16
+            )
+
+        torch.compiler.reset()
+        backend = InductorAndRecordGraphs()
+        cmp = torch.compile(spyre_fn, backend=backend)
+        cmp(a, b, scale_a, scale_b)
+
+        graph_str = normalize_gm(
+            backend.inductor_graphs[0].print_readable(print_output=False)
+        )
+
+        # The 3D _scaled_mm must have been rewritten: two view nodes must be present
+        assert "aten._scaled_mm" in graph_str, (
+            "Expected aten._scaled_mm to be present after pass"
+        )
+        assert graph_str.count("aten.view") >= 2, (
+            "Expected at least two aten.view nodes (flatten + unflatten) around _scaled_mm"
+        )
+        @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
+    @pytest.mark.filterwarnings("ignore::UserWarning")
+    def test_flatten_3d_scaled_mm_pass_graph(
+        self,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        scale_a: torch.Tensor,
+        scale_b: torch.Tensor,
+    ):
+        """
+        Verify flatten_3d_scaled_mm_pass rewrites _scaled_mm([B,M,K],[K,N])
+        to view([B,M,K]->[B*M,K]) + _scaled_mm([B*M,K],[K,N]) + view([B*M,N]->[B,M,N]).
+
+        After the pass the Inductor graph must not contain a 3D _scaled_mm: it
+        must contain exactly two aten.view nodes wrapping a 2D _scaled_mm.
+        """
+        from torch._dynamo.testing import InductorAndRecordGraphs, normalize_gm
+        import torch._inductor.config as config
+
+        config.force_disable_caches = True
+
+        def spyre_fn(a, b, scale_a, scale_b):
+            q_a = torch.ops.spyre.quantize_fp8_with_scale(a, scale_a)
+            q_b = torch.ops.spyre.quantize_weight_fp8_with_scale(b, scale_b)
+            return torch.ops.aten._scaled_mm(
+                q_a, q_b, scale_a, scale_b, bias=None, out_dtype=torch.float16
+            )
+
+        torch.compiler.reset()
+        backend = InductorAndRecordGraphs()
+        cmp = torch.compile(spyre_fn, backend=backend)
+        cmp(a, b, scale_a, scale_b)
+
+        graph_str = normalize_gm(
+            backend.inductor_graphs[0].print_readable(print_output=False)
+        )
+
+        # The 3D _scaled_mm must have been rewritten: two view nodes must be present
+        assert "aten._scaled_mm" in graph_str, (
+            "Expected aten._scaled_mm to be present after pass"
+        )
+        assert graph_str.count("aten.view") >= 2, (
+            "Expected at least two aten.view nodes (flatten + unflatten) around _scaled_mm"
+        )
+    
     def test_mixed_device_seq(self):
         model = torch.compile(torch.sin)
         cpu_1 = torch._inductor.utils.get_code(model, torch.randn(5))[0]

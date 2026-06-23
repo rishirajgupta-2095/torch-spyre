@@ -357,6 +357,13 @@ SCALED_MM_TESTS = {
     for shape in _SCALED_MM_SHAPES
     for sa, sb, b in _SCALED_MM_PARAMS
 }
+SCALED_MM_TESTS["3d_2x128x128"] = (
+    torch.rand((2, 128, 128), dtype=torch.float16),
+    torch.rand((128, 128), dtype=torch.float16),
+    torch.tensor([1.0], dtype=torch.float16),
+    torch.tensor([1.0], dtype=torch.float16),
+    torch.tensor([0.0], dtype=torch.float16),
+)
 
 SCALED_MM_TESTS_EXPECT_FAIL = [
     f"{shapes2key([shape])}_{sa}_{sb}_{b}"

@@ -363,3 +363,73 @@ def _unflatten_bmm_batch_dims(
                 and not expand_node.users
             ):
                 graph.erase_node(expand_node)
+def flatten_3d_scaled_mm_pass(graph: torch.fx.Graph) -> None:
+    """
+    Rewrite 3D×2D _scaled_mm to 2D×2D by inserting surrounding view nodes.
+
+    The Spyre FP8 matmul kernel only handles 2D inputs. When _scaled_mm
+    receives a batched (3D) first argument paired with a 2D second argument:
+
+        _scaled_mm([B, M, K], [K, N], ...) -> [B, M, N]
+
+    this pass rewrites the graph to:
+
+        aten.view([B, M, K] -> [B*M, K])
+        aten._scaled_mm([B*M, K], [K, N], ...)  -> [B*M, N]
+        aten.view([B*M, N] -> [B, M, N])
+
+    The 2D _scaled_mm then hits the existing lower_scaled_mm 2D path and
+    the hardware FP8 kernel, which require 2D inputs.
+    """
+    for node in list(graph.nodes):
+        if node.op != "call_function" or node.target != aten._scaled_mm.default:
+            continue
+        if len(node.args) < 2:
+            continue
+
+        mat1_node = node.args[0]
+        mat2_node = node.args[1]
+
+        if not (isinstance(mat1_node, torch.fx.Node) and "val" in mat1_node.meta):
+            continue
+        if not (isinstance(mat2_node, torch.fx.Node) and "val" in mat2_node.meta):
+            continue
+
+        mat1_shape = list(mat1_node.meta["val"].shape)
+        mat2_shape = list(mat2_node.meta["val"].shape)
+
+        if len(mat1_shape) != 3 or len(mat2_shape) != 2:
+            continue
+
+        B, M, K = mat1_shape
+        N = mat2_shape[1]
+        mat1_dtype = mat1_node.meta["val"].dtype
+        out_dtype = node.meta["val"].dtype
+
+        with graph.inserting_before(node):
+            # Flatten mat1: [B, M, K] -> [B*M, K]
+            flat_shape = [B * M, K]
+            flat_node = graph.call_function(
+                aten.view.default,
+                args=(mat1_node, flat_shape),
+            )
+            flat_node.meta["val"] = torch.empty(flat_shape, dtype=mat1_dtype, device="meta")
+
+            # 2D _scaled_mm: [B*M, K] x [K, N] -> [B*M, N]
+            mm_2d = graph.call_function(
+                aten._scaled_mm.default,
+                args=(flat_node,) + node.args[1:],
+                kwargs=node.kwargs,
+            )
+            mm_2d.meta["val"] = torch.empty([B * M, N], dtype=out_dtype, device="meta")
+
+            # Unflatten result: [B*M, N] -> [B, M, N]
+            out_shape = [B, M, N]
+            unflatten_node = graph.call_function(
+                aten.view.default,
+                args=(mm_2d, out_shape),
+            )
+            unflatten_node.meta["val"] = torch.empty(out_shape, dtype=out_dtype, device="meta")
+
+        node.replace_all_uses_with(unflatten_node)
+        graph.erase_node(node)
