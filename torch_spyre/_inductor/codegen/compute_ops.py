@@ -185,31 +185,6 @@ def gen_coord_info_value(
             },
         }
     elif is_stick_dim and is_fp8_stick and not (stick_idx == 0):
-        # FP8 QFP8WT weight, 64-element stick side (stick_idx == 1).
-        #
-        # Match the known-good sendnn SDSC for ScaledBMM: the 64-element FP8
-        # stick is laid out as elem_arr_1(8) x elem_arr_0(8) = 64, and the
-        # number of sticks this core owns scales via elem_arr_2. The cross-core
-        # split of this dimension is carried by core_fold (= nsplits), so the
-        # elemArr only needs to describe the per-core extent.
-        #
-        # The previous form hardcoded elem_arr_2=64, elem_arr_1=2 (cardinality
-        # 128) and pushed size into the stride only, so the elemArr never
-        # described more than 128 elements regardless of the dimension size.
-        # That happened to equal the dimension when size == 128 but under-counts
-        # for larger N/K, which the DSC rejects with
-        # "distributeElemArrToTemporalLoops: Not enough elements to distribute".
-        #
-        # ``size`` here is the per-core extent on the 64-element stick side: the
-        # caller passes iteration_space[dim] // work_slices[dim]. The inner
-        # elemArr describes the per-core out footprint as elem_arr_2 (stick
-        # count = size // 64) x 8 x 8, so its total equals ``size``. The
-        # core-fold stride must also equal ``size`` so consecutive cores tile
-        # the dimension contiguously (core_fold * size == N), matching the
-        # OUTPUT fold in the same kernel. Using size * other_stick_size here
-        # double-strides and makes the weight loop span 2*N, which the DSC
-        # rejects ("Loop split needed").
-        sticks_per_core = max(size // 64, 1)
         return {
             "spatial": 3,
             "temporal": 0,
@@ -220,7 +195,7 @@ def gen_coord_info_value(
                     {"Affine": {"alpha_": size, "beta_": 0}},
                     {"Affine": {"alpha_": 0, "beta_": 0}},
                     {"Affine": {"alpha_": 0, "beta_": 0}},
-                    {"Affine": {"alpha_": 64, "beta_": 0}},
+                    {"Affine": {"alpha_": (size // 8), "beta_": 0}},
                     {"Affine": {"alpha_": 8, "beta_": 0}},
                     {"Affine": {"alpha_": 1, "beta_": 0}},
                 ],
@@ -228,9 +203,9 @@ def gen_coord_info_value(
                     {"factor_": nsplits, "label_": "core_fold"},
                     {"factor_": 1, "label_": "corelet_fold"},
                     {"factor_": 1, "label_": "row_fold"},
-                    {"factor_": sticks_per_core, "label_": "elem_arr_2"},
-                    {"factor_": 8, "label_": "elem_arr_1"},
-                    {"factor_": 8, "label_": "elem_arr_0"},
+                    {"factor_": 64, "label_": "elem_arr_2"},
+                    {"factor_": 2, "label_": "elem_arr_1"},
+                    {"factor_": 1, "label_": "elem_arr_0"},
                 ],
             },
         }

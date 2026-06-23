@@ -35,7 +35,7 @@ from torch._inductor.graph import GraphLowering
 from torch_spyre._C import ElementArrangement
 
 from .errors import Unsupported
-from .constants import BATCH_MATMUL_OP, BATCH_MATMUL_FP8_OP, TOPK_OPS
+from .constants import BATCH_MATMUL_OP, TOPK_OPS
 from .ir import FixedTiledLayout
 from .pass_utils import (
     SchedNodeArg,
@@ -936,32 +936,6 @@ def work_distribution_pass(
     splits, output_dims, reduction_dims = _default_split(
         it_space_adjusted, output_td, committed_splits, max_cores, symbol_meta
     )
-
-    # EXPERIMENT (remove after validating): the default distributor spends all
-    # cores on the output (N) and leaves the FP8 matmul reduction (K) unsplit,
-    # so per-core K = full K. For large K this aborts the DSC with
-    # "Loop split needed" (dsc2.cpp:6346). Force a K-split across cores (k=2) by
-    # stealing a factor of 2 from the largest output-dim split, to test whether
-    # distributing the reduction (existing k_fast/PSUM path) clears 6346.
-    if (
-        isinstance(op.data, Reduction)
-        and op.data.reduction_type == BATCH_MATMUL_FP8_OP
-        and reduction_dims
-    ):
-        k = reduction_dims[0]
-        k_elems = concretize_expr(it_space[k])
-        k_adj = concretize_expr(it_space_adjusted[k])
-        if k_elems >= 4096 and splits.get(k, 1) == 1 and k_adj % 2 == 0:
-            donor = max(
-                output_dims, key=lambda d: splits.get(d, 1), default=None
-            )
-            if donor is not None and splits.get(donor, 1) % 2 == 0:
-                splits[donor] //= 2
-                splits[k] = 2
-                logger.info(
-                    f"[EXPERIMENT] forced K-split for {op.get_name()}: "
-                    f"donor={donor} k={k} splits={splits}"
-                )
 
     apply_splits(op, splits, output_td)
 

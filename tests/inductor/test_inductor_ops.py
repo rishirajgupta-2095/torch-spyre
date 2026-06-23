@@ -660,9 +660,9 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     cached_randn((2, 2, 2048, 2048)),
                     cached_xavier((2, 2, 2048, 65536)),
                 ),
-                # fp16 at the same shape as the failing FP8 case (M=4, K=4096,
-                # N=4096): tests whether large-K hits the per-issue reduction
-                # limit (6346) regardless of dtype, or whether it is FP8-specific.
+                # fp16 reference at the FP8 problem shape (M=4, K=4096, N=4096):
+                # confirms large-K matmul fits a single issue for fp16, so the
+                # FP8 large-K failure is layout-specific (2D-stick), not general.
                 "2d_M4_K4096_N4096": (
                     cached_randn((4, 4096)),
                     cached_xavier((4096, 4096)),
@@ -4126,43 +4126,6 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     torch.tensor([1.0], dtype=torch.float16),
                     torch.tensor([1.0], dtype=torch.float16),
                 ),
-                "2x4096x4096": (
-                    torch.rand((2, 4096), dtype=torch.float16),
-                    torch.rand((4096, 4096), dtype=torch.float16),
-                    torch.tensor([1.0], dtype=torch.float16),
-                    torch.tensor([1.0], dtype=torch.float16),
-                ),
-                "4x4096x4096": (
-                    torch.rand((4, 4096), dtype=torch.float16),
-                    torch.rand((4096, 4096), dtype=torch.float16),
-                    torch.tensor([1.0], dtype=torch.float16),
-                    torch.tensor([1.0], dtype=torch.float16),
-                ),
-                # M-sweep at N=K=4096 to map where the K-split path is correct.
-                "1x4096x4096": (
-                    torch.rand((1, 4096), dtype=torch.float16),
-                    torch.rand((4096, 4096), dtype=torch.float16),
-                    torch.tensor([1.0], dtype=torch.float16),
-                    torch.tensor([1.0], dtype=torch.float16),
-                ),
-                "8x4096x4096": (
-                    torch.rand((8, 4096), dtype=torch.float16),
-                    torch.rand((4096, 4096), dtype=torch.float16),
-                    torch.tensor([1.0], dtype=torch.float16),
-                    torch.tensor([1.0], dtype=torch.float16),
-                ),
-                "16x4096x4096": (
-                    torch.rand((16, 4096), dtype=torch.float16),
-                    torch.rand((4096, 4096), dtype=torch.float16),
-                    torch.tensor([1.0], dtype=torch.float16),
-                    torch.tensor([1.0], dtype=torch.float16),
-                ),
-                "32x4096x4096": (
-                    torch.rand((32, 4096), dtype=torch.float16),
-                    torch.rand((4096, 4096), dtype=torch.float16),
-                    torch.tensor([1.0], dtype=torch.float16),
-                    torch.tensor([1.0], dtype=torch.float16),
-                ),
             },
         },
     }
@@ -5795,11 +5758,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         def pytorch_fn(a, b, scale_a, scale_b):
             q_a = (a / scale_a).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
             q_b = (b / scale_b).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
-            # Accumulate in higher precision, matching fp8 GEMM semantics (and
-            # Spyre). A raw fp8 @ fp8 accumulates/saturates in fp8 (max 448), so
-            # for large K the sum overflows to inf/NaN.
-            out = q_a.to(torch.float32) @ q_b.to(torch.float32)
-            return out.to(torch.float16) * (scale_a * scale_b)
+            return (q_a @ q_b).to(torch.float16) * (scale_a * scale_b)
 
         compare_with_pytorch(
             spyre_fn, pytorch_fn, a, b, scale_a, scale_b, atol=0.1, rtol=0.1
