@@ -313,6 +313,17 @@ def _single_arg_op_layout(
                     out_device_size[i] = stl.device_size[i] * in_eps // out_eps
                     out_stride_map[i] = out_eps
                     break
+            logger.debug(
+                "[fp8-layout] %s: in device_size=%s stride_map=%s in_eps=%s "
+                "out_eps=%s -> out device_size=%s stride_map=%s",
+                elem_arr,
+                list(stl.device_size),
+                list(stl.stride_map),
+                in_eps,
+                out_eps,
+                out_device_size,
+                out_stride_map,
+            )
             return [
                 SpyreTensorLayout(
                     out_device_size,
