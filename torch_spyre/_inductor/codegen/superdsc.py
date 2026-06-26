@@ -807,7 +807,7 @@ def parse_op_spec(op_spec: OpSpec) -> tuple["SDSCSpec", "dict"]:
                     ),
                     None,
                 )
-                if dim_sym is None or dim_sym == stick_dim:
+                if dim_sym is None or dim_sym in stick_dim:
                     continue
                 padded_it_size = sdsc_iteration_space[dim_sym]
                 dev_dim_size = op_spec_arg.device_size[coord_idx]
