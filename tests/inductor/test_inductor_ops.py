@@ -348,6 +348,30 @@ SCALED_MM_TESTS = {
 }
 
 
+# spyre.scaled_bmm: FP8 batched matmul (batched counterpart of _scaled_mm).
+# (mat1_shape, mat2_shape) with mat1 [*batch, M, K] @ mat2 [*batch, K, N].
+# K is stick-aligned (multiple of 64). Scales are per-tensor and, like the
+# scaled_mm lowering, are not applied in the reduction, so they are kept at 1.0.
+_SCALED_BMM_SHAPES = {
+    # 3D @ 3D: [B, M, K] @ [B, K, N]
+    "3d_4x64x128x64": ((4, 64, 128), (4, 128, 64)),
+    "3d_2x64x128x128": ((2, 64, 128), (2, 128, 128)),
+    # 4D @ 4D: [B, H, M, K] @ [B, H, K, N]  (attention QK: Q @ Kᵀ)
+    "4d_1x32x64x128x64": ((1, 32, 64, 128), (1, 32, 128, 64)),
+    "4d_2x8x64x128x128": ((2, 8, 64, 128), (2, 8, 128, 128)),
+}
+
+SCALED_BMM_TESTS = {
+    key: (
+        torch.rand(mat1_shape, dtype=torch.float16),
+        torch.rand(mat2_shape, dtype=torch.float16),
+        torch.tensor(1.0, dtype=torch.float16),
+        torch.tensor(1.0, dtype=torch.float16),
+    )
+    for key, (mat1_shape, mat2_shape) in _SCALED_BMM_SHAPES.items()
+}
+
+
 FP32_EPS = torch.finfo(torch.float32).eps  # 1.1920928955078125e-07
 FP16_EPS = torch.finfo(torch.float16).eps  # 0.0009765625
 
@@ -4523,6 +4547,9 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         ("test_fp8_scaled_mm", "test_fp8_scaled_mm_cpu"): {
             "param_sets": SCALED_MM_TESTS,
         },
+        ("test_fp8_scaled_bmm", "test_fp8_scaled_bmm_cpu"): {
+            "param_sets": SCALED_BMM_TESTS,
+        },
         (
             "test_multiops_split",
             "test_view_permute_mul",
@@ -6317,6 +6344,35 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
 
         compare_with_pytorch(
             spyre_fn, pytorch_fn, a, b, scale_a, scale_b, bias, atol=0.1, rtol=0.1
+        )
+
+    def test_fp8_scaled_bmm_cpu(self, a, b, scale_a, scale_b):
+        """Test spyre.scaled_bmm (FP8 batched matmul) for 3D and 4D inputs."""
+
+        def spyre_fn(a, b, scale_a, scale_b):
+            q_a = torch.ops.spyre.quantize_fp8_with_scale(a, scale_a)
+            q_b = torch.ops.spyre.quantize_weight_fp8_with_scale(b, scale_b)
+            return torch.ops.spyre.scaled_bmm(
+                q_a, q_b, scale_a, scale_b, out_dtype=torch.float16
+            )
+
+        def pytorch_fn(a, b, scale_a, scale_b):
+            q_a = (
+                (a / scale_a)
+                .clamp(-448.0, 448.0)
+                .to(torch.float8_e4m3fn)
+                .to(torch.float16)
+            )
+            q_b = (
+                (b / scale_b)
+                .clamp(-448.0, 448.0)
+                .to(torch.float8_e4m3fn)
+                .to(torch.float16)
+            )
+            return (q_a @ q_b) * (scale_a * scale_b)
+
+        compare_with_pytorch(
+            spyre_fn, pytorch_fn, a, b, scale_a, scale_b, atol=0.1, rtol=0.1
         )
 
     def test_is_nonzero_cpu(self, *args):

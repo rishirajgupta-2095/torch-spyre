@@ -677,6 +677,45 @@ def _(input: torch.Tensor) -> torch.Tensor:
     return torch.empty(input.size(), dtype=torch.float8_e4m3fn, device=input.device)
 
 
+@torch.library.custom_op("spyre::scaled_bmm", mutates_args=(), device_types="spyre")
+def scaled_bmm(
+    mat1: torch.Tensor,
+    mat2: torch.Tensor,
+    scale1: torch.Tensor,
+    scale2: torch.Tensor,
+    out_dtype: Optional[torch.dtype] = None,
+    use_fast_accum: bool = False,
+) -> torch.Tensor:
+    """
+    FP8 batched (N-D) scaled matmul: the batched counterpart to aten._scaled_mm.
+
+    Consumers (fms-model-optimizer / vLLM) call this op directly for FP8
+    attention QK, e.g. query[B, H, S, D] @ key_T[B, H, D, S] -> [B, H, S, S].
+    Both inputs must be FP8 E4M3 and share the same leading batch dims; scales
+    are per-tensor. This body is only reached in eager mode on non-Spyre
+    devices; under torch.compile it is replaced by ``lower_scaled_bmm``
+    (see lowering.py).
+
+    Maps to: deeptools batchmatmulfp8 (BMM variant).
+    """
+    pass
+
+
+@scaled_bmm.register_fake
+def _(
+    mat1: torch.Tensor,
+    mat2: torch.Tensor,
+    scale1: torch.Tensor,
+    scale2: torch.Tensor,
+    out_dtype: Optional[torch.dtype] = None,
+    use_fast_accum: bool = False,
+) -> torch.Tensor:
+    # [*batch, M, K] @ [*batch, K, N] -> [*batch, M, N]
+    output_dtype = out_dtype if out_dtype is not None else torch.float16
+    output_shape = (*mat1.shape[:-2], mat1.shape[-2], mat2.shape[-1])
+    return torch.empty(output_shape, dtype=output_dtype, device=mat1.device)
+
+
 @torch.library.custom_op("spyre::prod_dim_int", mutates_args=(), device_types="spyre")
 def prod_dim_int(input: torch.Tensor, dim: int, keepdim: bool = False) -> torch.Tensor:
     pass

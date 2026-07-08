@@ -352,6 +352,89 @@ def lower_scaled_mm(
     return result
 
 
+@register_spyre_lowering(torch.ops.spyre.scaled_bmm.default)
+def lower_scaled_bmm(
+    mat1,
+    mat2,
+    scale1,
+    scale2,
+    out_dtype=None,
+    use_fast_accum=False,
+):
+    # FP8 batched matmul. Mirrors lower_scaled_mm (FP8 dtype checks +
+    # BATCH_MATMUL_FP8_OP reduction) with the batched inner_fn indexing of
+    # lower_bmm. As in lower_scaled_mm, the per-tensor scales are not consumed
+    # in the reduction here; only mat1/mat2 feed the FP8 matmul.
+    mat1.realize()
+    mat2.realize()
+    mat1_loader = mat1.make_loader()
+    mat2_loader = mat2.make_loader()
+
+    mat1_size = mat1.get_size()
+    mat2_size = mat2.get_size()
+    mat1_ndim = len(mat1_size)
+    mat2_ndim = len(mat2_size)
+
+    mat1_dtype = mat1.get_dtype()
+    mat2_dtype = mat2.get_dtype()
+
+    if mat1_dtype not in [torch.float8_e4m3fn]:
+        raise ValueError(f"Expected FP8 input for mat1, got {mat1_dtype}")
+    if mat2_dtype not in [torch.float8_e4m3fn]:
+        raise ValueError(f"Expected FP8 input for mat2, got {mat2_dtype}")
+
+    output_dtype = out_dtype if out_dtype is not None else torch.float16
+    reduction_numel = mat1_size[-1]  # K
+
+    if mat1_ndim == 4 and mat2_ndim == 4:
+        # [B, H, M, K] × [B, H, K, N] → [B, H, M, N]
+        ranges = [mat1_size[0], mat1_size[1], mat1_size[2], mat2_size[-1]]
+
+        def inner_fn(index, reduction_index):
+            i0, i1, i2, i3 = index
+            (r0,) = reduction_index
+            return (mat1_loader([i0, i1, i2, r0]), mat2_loader([i0, i1, r0, i3]))
+
+    elif mat1_ndim == 3 and mat2_ndim == 3:
+        # [B, M, K] × [B, K, N] → [B, M, N]
+        ranges = [mat1_size[0], mat1_size[1], mat2_size[-1]]
+
+        def inner_fn(index, reduction_index):
+            i0, i1, i2 = index
+            (r0,) = reduction_index
+            return (mat1_loader([i0, i1, r0]), mat2_loader([i0, r0, i2]))
+
+    else:
+        raise Unsupported(
+            f"scaled_bmm with shapes {mat1_size} and {mat2_size} not supported"
+        )
+
+    result = Reduction.create(
+        reduction_type=BATCH_MATMUL_FP8_OP,
+        input_node=[mat1, mat2],
+        device=mat1.get_device(),
+        dst_dtype=output_dtype,
+        src_dtype=mat1_dtype,
+        inner_fn=inner_fn,
+        ranges=ranges,
+        reduction_ranges=[reduction_numel],
+    )
+
+    result.realize()
+
+    if logger.isEnabledFor(logging.DEBUG):
+        result_buf = V.graph.get_buffer(result.get_name())
+        logger.debug(
+            f"scaled_bmm (FP8): mat1{[int(s) for s in mat1_size]} @ "
+            f"mat2{[int(s) for s in mat2_size]} "
+            f"-> {[int(s) for s in result_buf.get_size()]}, "
+            f"mat1_dtype={mat1_dtype}, mat2_dtype={mat2_dtype}, "
+            f"out_dtype={output_dtype}"
+        )
+
+    return result
+
+
 @register_spyre_lowering(torch.ops.aten.mm.default)
 def lower_mm(x, y):
     x.realize()
