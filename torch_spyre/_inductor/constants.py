@@ -18,6 +18,10 @@ BATCH_MATMUL_OP = "batchmatmul"
 IDENTITY_OP = "identity"
 RESTICKIFY_OP = "ReStickifyOpHBM"
 BATCH_MATMUL_FP8_OP = "batchmatmulfp8"
+# DeepTools minibatch (batched) FP8 matmul variant. `batchmatmulfp8` maps to the
+# 2D-only MatMul kernel (bmm.ddl `bmm_fp8_op`); the batched QK/attention case
+# (>2D) must select the `bmm_fp8_mb_op` kernel via this op-func name instead.
+BATCH_MATMUL_FP8_MB_OP = "batchmatmulfp8mb"
 
 # Reduction ops that cannot reduce along the stick dimension.
 # Native prod reduction is not currently available in the backend.

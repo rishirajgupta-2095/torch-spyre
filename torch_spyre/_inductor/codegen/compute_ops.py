@@ -245,7 +245,11 @@ def gen_coord_info_value(
                 ],
             },
         }
-    elif is_stick_dim and tensor_idx == 0 and opfunc == "batchmatmulfp8":
+    elif (
+        is_stick_dim
+        and tensor_idx == 0
+        and opfunc in ("batchmatmulfp8", "batchmatmulfp8mb")
+    ):
         return {
             "spatial": 3,
             "temporal": 0,
