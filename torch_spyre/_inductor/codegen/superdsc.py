@@ -21,8 +21,6 @@ from sympy import Integer, Symbol, Expr, Mod, floor
 from torch._inductor.virtualized import V
 from torch_spyre._C import DataFormats, ElementArrangement
 from torch_spyre._inductor.constants import (
-    BATCH_MATMUL_FP8_OP,
-    BATCH_MATMUL_FP8_MB_OP,
     IDENTITY_OP,
     INPUT_DIM_LABELS,
     OUTPUT_DIM_LABELS,
@@ -581,9 +579,7 @@ def _create_sdsc_tensors(
     return sdsc_args, layouts, missing_dim
 
 
-def _get_op_func(
-    op: str, is_reduction: bool, output_scales: dict, ndim: int = 0
-) -> str:
+def _get_op_func(op: str, is_reduction: bool, output_scales: dict) -> str:
     if (
         is_reduction
         and not _is_matmul(op)
@@ -591,12 +587,6 @@ def _get_op_func(
         and -2 not in output_scales.values()
     ):
         return op + "nonstick"
-    # The FP8 matmul op has two DeepTools kernels: `batchmatmulfp8` (2D MatMul
-    # variant, bmm.ddl `bmm_fp8_op`) and `batchmatmulfp8mb` (minibatch/BMM
-    # variant, `bmm_fp8_mb_op`). A 2D matmul has 3 iteration dims (M, N, K); any
-    # extra dim is a batch dim, which only the `mb` kernel can lower.
-    if op == BATCH_MATMUL_FP8_OP and ndim > 3:
-        return BATCH_MATMUL_FP8_MB_OP
     return op
 
 
@@ -894,9 +884,7 @@ def parse_op_spec(op_spec: OpSpec) -> tuple["SDSCSpec", "dict"]:
 
     return (
         SDSCSpec(
-            opfunc=_get_op_func(
-                op_spec.op, op_spec.is_reduction, args[-1].scales, ndim
-            ),
+            opfunc=_get_op_func(op_spec.op, op_spec.is_reduction, args[-1].scales),
             execution_unit="pt" if is_matmul else "sfp",
             data_format=args[
                 1 if indirect_access_indices else 0
