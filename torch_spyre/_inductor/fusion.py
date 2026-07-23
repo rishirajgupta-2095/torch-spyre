@@ -18,10 +18,10 @@ from torch._inductor.scheduler import (
     SchedulerNode,
 )
 from torch._inductor.virtualized import V
-from torch._inductor.ir import FallbackKernel
+from torch._inductor.ir import FallbackKernel, Reduction
 from torch_spyre._inductor.logging_utils import _get_env_bool
 from .ir import FixedTiledLayout
-from .constants import SEGMENT_OFFSETS
+from .constants import BATCH_MATMUL_FP8_OP, SEGMENT_OFFSETS
 from .scheduler import CountedLoopSchedulerNode
 
 # TODO: Temporary hook to easily disable
@@ -69,6 +69,16 @@ def _count_non_intermediate_tensors(node: BaseSchedulerNode) -> int:
     return sum(1 for name in names if _is_non_intermediate(name))
 
 
+def _is_fp8_matmul(n: BaseSchedulerNode) -> bool:
+    """Return True if n is a batchmatmulfp8 reduction node."""
+    return (
+        isinstance(n, SchedulerNode)
+        and n.node is not None
+        and isinstance(n.node.data, Reduction)
+        and n.node.data.reduction_type == BATCH_MATMUL_FP8_OP
+    )
+
+
 def spyre_fuse_nodes(nodes: list[BaseSchedulerNode]) -> list[BaseSchedulerNode]:
     """
     Fuse nodes together to form kernels without changing their order.
@@ -77,6 +87,13 @@ def spyre_fuse_nodes(nodes: list[BaseSchedulerNode]) -> list[BaseSchedulerNode]:
      1. We only want to fuse SchedulerNodes (ie, nodes that generate OpSpecs).
      2. A SDSC Bundle can refer to at most 5 unique non-intermediate tensors
         (graph inputs/outputs). Intermediates don't count toward this limit.
+     3. batchmatmulfp8 must not be fused with upstream pointwise ops whose
+        tensors have a different rank. DeepTools assigns dim labels per-op
+        independently; when a pointwise of rank R and a BMM of rank R+1 share
+        the same SDSC, the global layout merge produces label conflicts (e.g.
+        multiple "mb" or "y" candidates) that cause error 2497. Force a bundle
+        boundary immediately before every batchmatmulfp8 node so its producer
+        (e.g. qfp8wt) always lands in a preceding SDSC.
     """
     if not _FUSION_ENABLED or len(nodes) == 0:
         return nodes
@@ -89,6 +106,14 @@ def spyre_fuse_nodes(nodes: list[BaseSchedulerNode]) -> list[BaseSchedulerNode]:
 
     for n in nodes:
         if isinstance(n, SchedulerNode):
+            # batchmatmulfp8 must always start a fresh bundle (constraint 3).
+            if _is_fp8_matmul(n) and cur_nodes:
+                if fused := _make_fused(cur_nodes):
+                    fused_nodes.append(fused)
+                cur_nodes = []
+                cur_tensors = set()
+                cur_non_intermediate_count = 0
+
             n_tensors = {dep.name for dep in n.read_writes.reads_and_writes()}
             new_tensors = n_tensors - cur_tensors
             new_non_intermediate = sum(

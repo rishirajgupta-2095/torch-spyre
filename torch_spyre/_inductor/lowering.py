@@ -133,7 +133,7 @@ def enable_spyre_lowerings():
     """
     CM that enables Spyre lowerings:
       - Temporarily redirect relevant aten ops → Spyre lowering
-      - Restore original aten lowerings on exit
+      - Restore original aten lowerings on sda-
 
     This CM is reentrant and safe under nested usage.
     """
@@ -322,6 +322,15 @@ def lower_scaled_mm(
             i0, i1, i2 = index
             (r0,) = reduction_index
             return (mat1_loader([i0, i1, r0]), mat2_loader([i0, r0, i2]))
+
+    elif mat1_ndim == 4 and mat2_ndim == 4:
+        # [B, H, M, K] × [B, H, K, N] → [B, H, M, N]
+        ranges = [mat1_size[0], mat1_size[1], mat1_size[2], mat2_size[3]]
+
+        def inner_fn(index, reduction_index):
+            i0, i1, i2, i3 = index
+            (r0,) = reduction_index
+            return (mat1_loader([i0, i1, i2, r0]), mat2_loader([i0, i1, r0, i3]))
 
     else:
         raise Unsupported(

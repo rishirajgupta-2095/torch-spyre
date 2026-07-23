@@ -511,10 +511,18 @@ def _create_sdsc_tensors(
         dtype_stick_size = arg.device_dtype.elems_per_stick()
         layout_stick_size = [dtype_stick_size]
         if is_fp8_mm_kernel_arg:
-            # FP8 KERNEL needs 2D stick: [2, stick_size/2]
+            # FP8 KERNEL needs a 2D stick [2, stick_size/2] packing the
+            # contraction (in) and output (out) dims. Selecting dim_order[-2:]
+            # positionally is only correct for a 2D kernel ([in, out]); for a
+            # batched matmul a batch dim sits between them (e.g. [in, x, out]),
+            # so [-2:] == [x, out] would pack the batch dim and produce a kernel
+            # slice DeepTools cannot map. Select in/out by label instead.
             layout_stick_size = [2, dtype_stick_size // 2]
-            # Use the last two dimensions from dim_order for 2D stick
-            effective_stick = dim_order[-2:]
+            in_sym, out_sym = Symbol("in"), Symbol("out")
+            if in_sym in dim_order and out_sym in dim_order:
+                effective_stick = [in_sym, out_sym]
+            else:
+                effective_stick = dim_order[-2:]
 
         if has_indirect_access:
             label = get_indirect_layout_label(
