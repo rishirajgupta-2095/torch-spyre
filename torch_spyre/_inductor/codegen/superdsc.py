@@ -545,6 +545,19 @@ def _create_sdsc_tensors(
                 layout_labels,
             )
 
+        # TEMP DEBUG: dump the stick layout for matmul tensors so we can compare
+        # against the SuperDSC-Bundle spec (Input1 [in=128], Input2/kernel
+        # [in=2, out=64], Output [out=64]). Remove once 4D FP8 is validated.
+        if _is_matmul(op_spec.op):
+            print(
+                f"[STICK] {op_spec.op} arg{i} dt={arg.device_dtype} "
+                f"dim_order={[str(d) for d in dim_order]} "
+                f"stick={[str(d) for d in effective_stick]} "
+                f"stick_size={layout_stick_size} "
+                f"fp8_kernel={is_fp8_mm_kernel_arg}",
+                flush=True,
+            )
+
         # Index tensors carry 32-bit integer indices; re-label as SENUINT32 since
         # the backend doesn't yet accept IEEE_INT32 in SDSC (deeptools #4307).
         arg_data_format = (
