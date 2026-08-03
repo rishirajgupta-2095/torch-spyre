@@ -530,17 +530,35 @@ def find_stick_compatible_input_layout(
     """
     arg_dev_coords = [device_coordinates(stl, arg.dep, None) for stl in arg.layouts]
 
+    # TEMP DEBUG: trace which candidate/pass wins for the fp8 kernel (y) input.
+    if reduction_type == BATCH_MATMUL_FP8_OP and label == "y":
+        print(
+            f"[FSCIL] label={label} reduction_var={reduction_var} "
+            f"n_candidates={len(arg.layouts)}",
+            flush=True,
+        )
+        for j, (stl, dc) in enumerate(zip(arg.layouts, arg_dev_coords)):
+            print(
+                f"[FSCIL]   cand{j} device_size={list(stl.device_size)} "
+                f"stride_map={list(stl.stride_map)} "
+                f"arrangement={stl.element_arrangement} "
+                f"dev_coords={[str(c) for c in dc]}",
+                flush=True,
+            )
+
     # Pass 1: already stick-compatible.
     # stick_compatible() checks cross-tensor compatibility; here we only need
     # to know if this input's stick coord already carries the target loop variable.
-    for stl, dev_coords in zip(arg.layouts, arg_dev_coords):
+    for j, (stl, dev_coords) in enumerate(zip(arg.layouts, arg_dev_coords)):
         if reduction_var in dev_coords[-1].free_symbols:
+            if reduction_type == BATCH_MATMUL_FP8_OP and label == "y":
+                print(f"[FSCIL]   -> PASS1 picked cand{j}", flush=True)
             return stl
 
     # Pass 2: can be restickified — find the resolvable device coord for reduction_var
     # and use it as target_stick_expr for compute_restickify_target_layout.
     arg_host_coords = host_coordinates(arg.layout, arg.dep, None)
-    for stl, dev_coords in zip(arg.layouts, arg_dev_coords):
+    for j, (stl, dev_coords) in enumerate(zip(arg.layouts, arg_dev_coords)):
         target_stick_expr = _dev_coord_for_var(
             dev_coords, arg_host_coords, reduction_var
         )
@@ -550,6 +568,15 @@ def find_stick_compatible_input_layout(
             stl, arg.layout, target_stick_expr, arg_host_coords, dev_coords
         )
         if result is not None:
+            if reduction_type == BATCH_MATMUL_FP8_OP and label == "y":
+                print(
+                    f"[FSCIL]   -> PASS2 restickified from cand{j} "
+                    f"target_stick_expr={target_stick_expr} "
+                    f"result device_size={list(result.device_size)} "
+                    f"stride_map={list(result.stride_map)} "
+                    f"arrangement={result.element_arrangement}",
+                    flush=True,
+                )
             return result
 
     raise Unsupported(
