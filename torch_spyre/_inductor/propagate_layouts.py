@@ -598,6 +598,36 @@ def _matmul_layouts(
         y, generated_var, data.reduction_type, "y"
     )
 
+    if data.reduction_type == BATCH_MATMUL_FP8_OP:
+        # FP8 kernel stick is 2-D [in, out] (contraction dim x generated dim)
+        # and must be contiguous in the device layout.
+        # find_stick_compatible_input_layout only guarantees generated_var
+        # sits on the stick (last dim_order slot); for a batched matmul the
+        # reduction (in) dim can end up separated from it by a batch dim
+        # (e.g. [in, x, out]), which splits the 2-D stick pack across
+        # non-contiguous memory. Force in/out to be the trailing adjacent
+        # pair with batch dims placed before them, matching the working
+        # BERT/2-D kernel layout [..batch.., in, out].
+        y_host_coords = host_coordinates(y.layout, y.dep, None)
+        in_dim = next(
+            (i for i, c in enumerate(y_host_coords) if reduction_var in c.free_symbols),
+            None,
+        )
+        out_dim = next(
+            (i for i, c in enumerate(y_host_coords) if generated_var in c.free_symbols),
+            None,
+        )
+        if in_dim is not None and out_dim is not None:
+            batch_dims = [
+                i for i in range(len(y.layout.size)) if i not in (in_dim, out_dim)
+            ]
+            k_dim_order = batch_dims + [in_dim, out_dim]
+            ky_size = [concretize_expr(s) for s in y.layout.size]
+            ky_stride = [concretize_expr(s) for s in y.layout.stride]
+            y_req_stl = SpyreTensorLayout(
+                ky_size, ky_stride, y.layout.dtype, k_dim_order
+            )
+
     out_stick_dim = next(
         (i for i, c in enumerate(out_coords) if generated_var in c.free_symbols),
         None,
