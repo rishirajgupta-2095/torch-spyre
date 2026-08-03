@@ -521,6 +521,16 @@ def _create_sdsc_tensors(
             in_sym, out_sym = Symbol("in"), Symbol("out")
             if in_sym in dim_order and out_sym in dim_order:
                 effective_stick = [in_sym, out_sym]
+                # DeepTools forms the 2D [in, out] stick only when in and out
+                # are CONTIGUOUS in layoutDimOrder_. For a batched matmul a
+                # batch dim can land between them (dim_order == [in, x, out]),
+                # which splits the stick and corrupts the weight read. Put
+                # in, out first with batch dims after -- matching the
+                # proven-working BERT QK kernel layout [in, out, x].
+                # strides/scales/offsets are keyed by dim (order-independent),
+                # so only the logical listing changes here.
+                rest = [d for d in dim_order if d not in (in_sym, out_sym)]
+                dim_order = [in_sym, out_sym] + rest
             else:
                 effective_stick = dim_order[-2:]
 

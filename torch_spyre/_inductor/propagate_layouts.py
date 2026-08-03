@@ -351,26 +351,12 @@ def _single_arg_op_layout(
             )
             c_size = outer_sizes + [last_dim]
             c_stride = outer_strides + [1]
-            # get_generic_stick_layout (C++, spyre_tensor_impl.cpp) always
-            # places dim_order[0] at the device position immediately before
-            # the stick, and dim_order[-1] as the stick itself. c_size is
-            # [*batch, K, N] in natural host order, so an identity dim_order
-            # puts a batch dim at dim_order[0] instead of K whenever batch
-            # dims are present -- separating the contraction dim (K) from the
-            # stick (N) by every batch dim and corrupting the packed [2, 64]
-            # FP8 kernel stick for batched matmul. Put K's index (rank - 2)
-            # first so it lands adjacent to the stick; batch dims fill the
-            # middle; N's index (rank - 1) stays last. Degenerates to
-            # identity when there are no batch dims (rank == 2), which is
-            # why the non-batched (2D) case never hit this.
-            rank = len(c_size)
-            dim_order = [rank - 2] + list(range(rank - 2)) + [rank - 1]
             return [
                 SpyreTensorLayout(
                     c_size,
                     c_stride,
                     output.dtype,
-                    dim_order,
+                    list(range(len(c_size))),
                     ElementArrangement.QFP8WT,
                 )
             ]
