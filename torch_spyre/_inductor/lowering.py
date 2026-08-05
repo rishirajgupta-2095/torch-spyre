@@ -133,7 +133,7 @@ def enable_spyre_lowerings():
     """
     CM that enables Spyre lowerings:
       - Temporarily redirect relevant aten ops → Spyre lowering
-      - Restore original aten lowerings on sda-
+      - Restore original aten lowerings on exit
 
     This CM is reentrant and safe under nested usage.
     """
@@ -397,12 +397,17 @@ def lower_scaled_bmm(
 
     if mat1_ndim == 4 and mat2_ndim == 4:
         # [B, H, M, K] × [B, H, K, N] → [B, H, M, N]
-        ranges = [mat1_size[0], mat1_size[1], mat1_size[2], mat2_size[-1]]
+        # Keep all 4 dims as separate iteration symbols — mirrors lower_bmm 4D exactly.
+        # Each loader index is one clean symbol so _get_device_dim_order produces the
+        # correct layoutDimOrder_ for INPUT and OUTPUT. The previous B×H fusion used
+        # // and % to recover b and h from a fused i_bh, which caused the same symbol
+        # to appear in two device_coordinates and garbled the dim-order scan.
+        ranges = [mat1_size[0], mat1_size[1], mat1_size[2], mat2_size[3]]
 
         def inner_fn(index, reduction_index):
             i0, i1, i2, i3 = index
-            (r0,) = reduction_index
-            return (mat1_loader([i0, i1, i2, r0]), mat2_loader([i0, i1, r0, i3]))
+            (r_k,) = reduction_index
+            return (mat1_loader([i0, i1, i2, r_k]), mat2_loader([i0, i1, r_k, i3]))
 
     elif mat1_ndim == 3 and mat2_ndim == 3:
         # [B, M, K] × [B, K, N] → [B, M, N]
