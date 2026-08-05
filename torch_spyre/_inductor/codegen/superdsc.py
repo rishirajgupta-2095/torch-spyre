@@ -574,6 +574,10 @@ def _create_sdsc_tensors(
                 f"dim_order={[str(d) for d in dim_order]} "
                 f"stick={[str(d) for d in effective_stick]} "
                 f"stick_size={layout_stick_size} "
+                f"device_size={list(arg.device_size)} "
+                f"device_coords={[str(c) for c in arg.device_coordinates]} "
+                f"strides={ {str(k): v for k, v in strides.items()} } "
+                f"stride_dim_order={[str(d) for d in stride_dim_order]} "
                 f"fp8_kernel={is_fp8_mm_kernel_arg}",
                 flush=True,
             )
