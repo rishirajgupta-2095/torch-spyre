@@ -423,7 +423,16 @@ def lower_scaled_bmm(
             f"scaled_bmm with shapes {mat1_size} and {mat2_size} not supported"
         )
 
-    result = Reduction.create(
+    # Mirror lower_bmm: carry shared-weight unit-BMM metadata from the FX node
+    # through to spyre_kernel.py so B=1 batch dims get the correct SDSC layout.
+    custom_meta = _current_fx_custom_meta()
+    op_info = {}
+    if SHARED_WEIGHT_UNIT_BMM_CUSTOM_META_KEY in custom_meta:
+        op_info[SHARED_WEIGHT_UNIT_BMM_INFO_KEY] = custom_meta[
+            SHARED_WEIGHT_UNIT_BMM_CUSTOM_META_KEY
+        ]
+
+    reduction_kwargs = dict(
         reduction_type=BATCH_MATMUL_FP8_OP,
         input_node=[mat1, mat2],
         device=mat1.get_device(),
@@ -433,6 +442,10 @@ def lower_scaled_bmm(
         ranges=ranges,
         reduction_ranges=[reduction_numel],
     )
+    if op_info:
+        result = SpyreReduction.create(op_info=op_info, **reduction_kwargs)
+    else:
+        result = Reduction.create(**reduction_kwargs)
 
     result.realize()
 
