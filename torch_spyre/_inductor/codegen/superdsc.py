@@ -21,6 +21,7 @@ from sympy import Integer, Symbol, Expr, Mod, floor
 from torch._inductor.virtualized import V
 from torch_spyre._C import DataFormats, ElementArrangement
 from torch_spyre._inductor.constants import (
+    BATCH_MATMUL_FP8_OP,
     IDENTITY_OP,
     INPUT_DIM_LABELS,
     OUTPUT_DIM_LABELS,
@@ -521,18 +522,27 @@ def _create_sdsc_tensors(
             in_sym, out_sym = Symbol("in"), Symbol("out")
             if in_sym in dim_order and out_sym in dim_order:
                 effective_stick = [in_sym, out_sym]
-                # DeepTools forms the 2D [in, out] stick only when in and out
-                # are CONTIGUOUS in layoutDimOrder_. For a batched matmul a
-                # batch dim can land between them (dim_order == [in, x, out]),
-                # which splits the stick and corrupts the weight read. Put
-                # in, out first with batch dims after -- matching the
-                # proven-working BERT QK kernel layout [in, out, x].
-                # strides/scales/offsets are keyed by dim (order-independent),
-                # so only the logical listing changes here.
-                rest = [d for d in dim_order if d not in (in_sym, out_sym)]
-                dim_order = [in_sym, out_sym] + rest
             else:
                 effective_stick = dim_order[-2:]
+
+        # Batched fp8 matmul: the emitted SDSC carries NO explicit strides --
+        # DeepTools derives each tensor's strides from layoutDimOrder_ + N_.
+        # So dim_order IS the memory-layout definition. Every working
+        # reference (BERT QK, Granite, our passing 2D) lists the core matmul
+        # dims (mb / in / out) first and the batch dims (x, y, ...) LAST:
+        #     INPUT  [mb, in, ...batch]
+        #     KERNEL [in, out, ...batch]
+        #     OUTPUT [mb, out, ...batch]
+        # A batch dim left among the core dims (e.g. INPUT [x, mb, in] or
+        # KERNEL [in, x, out]) makes DeepTools compute a stride that steps
+        # across batches inside the stick, corrupting the read. Push batch
+        # dims to the end for every tensor, preserving the core order. 2D
+        # (no batch dim) is unchanged.
+        if op_spec.op == BATCH_MATMUL_FP8_OP:
+            core_syms = (Symbol("mb"), Symbol("in"), Symbol("out"))
+            core_dims = [d for d in dim_order if d in core_syms]
+            batch_dims = [d for d in dim_order if d not in core_syms]
+            dim_order = core_dims + batch_dims
 
         if has_indirect_access:
             label = get_indirect_layout_label(
