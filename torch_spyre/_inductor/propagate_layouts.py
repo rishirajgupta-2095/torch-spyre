@@ -584,6 +584,30 @@ def find_stick_compatible_input_layout(
     )
 
 
+def _reorder_nonstick_by_host_stride(stl: SpyreTensorLayout) -> SpyreTensorLayout:
+    """Return an STL with non-stick device dims sorted by host stride descending.
+
+    Largest host stride = outermost, matching physical memory order. The stick
+    (last device dim) is kept in place. device_size and stride_map are permuted
+    together, so the layout stays internally consistent by construction.
+    Elided (size-1) dims carry stride_map == -1; they sort to the inner end and
+    are harmless.
+    """
+    n = len(stl.device_size)
+    if n <= 2:
+        return stl  # only [dim, stick] (or less) -- nothing to reorder
+    nonstick = list(range(n - 1))
+    order = sorted(nonstick, key=lambda idx: stl.stride_map[idx], reverse=True)
+    if order == nonstick:
+        return stl  # already in memory order
+    perm = order + [n - 1]
+    new_size = [stl.device_size[p] for p in perm]
+    new_stride = [stl.stride_map[p] for p in perm]
+    return SpyreTensorLayout(
+        new_size, new_stride, stl.device_dtype, stl.element_arrangement
+    )
+
+
 def _matmul_layouts(
     op: Operation,
     output: FixedLayout,
@@ -624,6 +648,21 @@ def _matmul_layouts(
     y_req_stl = find_stick_compatible_input_layout(
         y, generated_var, data.reduction_type, "y"
     )
+
+    if data.reduction_type == BATCH_MATMUL_FP8_OP:
+        # For a batched fp8 matmul the INPUT (activation) STL, inherited from the
+        # qfp8ch layout, can order its non-stick device dims so a batch dim (x)
+        # lands INNER to the row dim (mb) -> device [in_outer, mb, x, stick].
+        # The OUTPUT STL (built explicitly below) and physical host memory both
+        # put batch dims OUTERMOST (x outer to mb). That INPUT/OUTPUT nesting
+        # mismatch scrambles the per-(head,row) correspondence.
+        # superdsc._calculate_device_stride derives strides from device_size
+        # products by position, so this is a real, not cosmetic, defect.
+        # Fix: reorder the non-stick device dims by host stride descending
+        # (largest host stride = outermost), matching memory order. This
+        # permutes device_size and stride_map together so they cannot desync;
+        # the stick (last dim, carrying reduction_var) is left in place.
+        x_req_stl = _reorder_nonstick_by_host_stride(x_req_stl)
 
     out_stick_dim = next(
         (i for i, c in enumerate(out_coords) if generated_var in c.free_symbols),
