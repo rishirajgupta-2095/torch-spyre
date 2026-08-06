@@ -323,11 +323,22 @@ def _single_arg_op_layout(
             out_device_size = list(stl.device_size)
             out_stride_map = list(stl.stride_map)
             out_device_size[-1] = out_eps
+            print(
+                f"[QFPCH] in_layout.size={list(in_layout.size)} "
+                f"stl.device_size={list(stl.device_size)} "
+                f"stl.stride_map={list(stl.stride_map)} "
+                f"in_eps={in_eps} out_eps={out_eps}",
+                flush=True,
+            )
             for i, s in enumerate(stl.stride_map):
                 if s == in_eps:
                     out_device_size[i] = stl.device_size[i] * in_eps // out_eps
                     out_stride_map[i] = out_eps
                     break
+            print(
+                f"[QFPCH] -> out_device_size={out_device_size} out_stride_map={out_stride_map}",
+                flush=True,
+            )
             return [
                 SpyreTensorLayout(
                     out_device_size,
@@ -641,6 +652,45 @@ def _matmul_layouts(
     reduction_var = find_reduction_var(x.dep, output_dep)
     generated_var = find_matmul_generated_var(y.dep, x.dep, output_dep)
 
+    if data.reduction_type == BATCH_MATMUL_FP8_OP:
+        print(
+            f"[MATMUL_LAYOUTS] op={data.reduction_type} "
+            f"reduction_var={reduction_var} generated_var={generated_var}",
+            flush=True,
+        )
+        print(
+            f"[INPUT_PATH]  x.dep={x.dep.name}  "
+            f"x.layout.size={list(x.layout.size)}  x.layout.stride={list(x.layout.stride)}  "
+            f"x.dep.index={x.dep.index}",
+            flush=True,
+        )
+        for j, stl in enumerate(x.layouts):
+            print(
+                f"[INPUT_PATH]    cand{j} device_size={list(stl.device_size)} "
+                f"stride_map={list(stl.stride_map)} "
+                f"arrangement={stl.element_arrangement}",
+                flush=True,
+            )
+        print(
+            f"[KERNEL_PATH] y.dep={y.dep.name}  "
+            f"y.layout.size={list(y.layout.size)}  y.layout.stride={list(y.layout.stride)}  "
+            f"y.dep.index={y.dep.index}",
+            flush=True,
+        )
+        for j, stl in enumerate(y.layouts):
+            print(
+                f"[KERNEL_PATH]   cand{j} device_size={list(stl.device_size)} "
+                f"stride_map={list(stl.stride_map)} "
+                f"arrangement={stl.element_arrangement}",
+                flush=True,
+            )
+        print(
+            f"[OUTPUT_PATH] output.size={list(output.size)}  "
+            f"output.stride={list(output.stride)}  "
+            f"out_coords={[str(c) for c in out_coords]}",
+            flush=True,
+        )
+
     x_req_stl = find_stick_compatible_input_layout(
         x, reduction_var, data.reduction_type, "x"
     )
@@ -667,6 +717,28 @@ def _matmul_layouts(
     c_size = [concretize_expr(s) for s in output.size]
     c_stride = [concretize_expr(s) for s in output.stride]
     out_stl = SpyreTensorLayout(c_size, c_stride, output.dtype, out_dim_order)
+
+    if data.reduction_type == BATCH_MATMUL_FP8_OP:
+        print(
+            f"[INPUT_PATH]  x_req_stl device_size={list(x_req_stl.device_size)} "
+            f"stride_map={list(x_req_stl.stride_map)} "
+            f"arrangement={x_req_stl.element_arrangement}",
+            flush=True,
+        )
+        print(
+            f"[KERNEL_PATH] y_req_stl device_size={list(y_req_stl.device_size)} "
+            f"stride_map={list(y_req_stl.stride_map)} "
+            f"arrangement={y_req_stl.element_arrangement}",
+            flush=True,
+        )
+        print(
+            f"[OUTPUT_PATH] out_stl device_size={list(out_stl.device_size)} "
+            f"stride_map={list(out_stl.stride_map)} "
+            f"dim_order={out_dim_order} "
+            f"arrangement={out_stl.element_arrangement}",
+            flush=True,
+        )
+
     op.restick_cost_fn = FixedInOutNode.from_args(
         [x, y], out_stl, [x_req_stl, y_req_stl], op
     )
@@ -1111,6 +1183,14 @@ def propagate_spyre_tensor_layouts(
         for name, real_input in zip(graph.graph_input_names, V.get_real_inputs()):
             if isinstance(real_input, torch.Tensor):
                 stl = real_input.device_tensor_layout()
+                print(
+                    f"[INPUT_STL] {name} shape={list(real_input.shape)} "
+                    f"dtype={real_input.dtype} "
+                    f"device_size={list(stl.device_size) if stl else None} "
+                    f"stride_map={list(stl.stride_map) if stl else None} "
+                    f"arrangement={stl.element_arrangement if stl else None}",
+                    flush=True,
+                )
                 if stl is None:
                     # All spyre tensors are created with device layouts.
                     # Therefore we expect all graph inputs to have them.

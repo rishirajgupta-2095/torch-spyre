@@ -752,6 +752,13 @@ def parse_op_spec(op_spec: OpSpec) -> tuple["SDSCSpec", "dict"]:
         "symbol mapping: %s",
         ", ".join(f"{k} -> {v}" for k, v in symbol_mapping.items()),
     )
+    if is_matmul and "fp8" in op_spec.op:
+        print(
+            f"[SYMBOL_MAP] op={op_spec.op} ndim={ndim} "
+            f"iteration_space={list(op_spec.iteration_space.keys())} "
+            f"mapping={{ {', '.join(f'{k}->{v}' for k, v in symbol_mapping.items())} }}",
+            flush=True,
+        )
 
     # For symbolic dims, use the max from symbolic_dim_bounds as the iteration-space size
     # so the emitted SDSC JSON is generated max sizes baked in, not symbols.
