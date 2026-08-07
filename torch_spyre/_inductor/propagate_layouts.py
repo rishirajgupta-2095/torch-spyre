@@ -346,6 +346,13 @@ def _rescale_stl_for_dtype(
     out_device_size = list(stl.device_size)
     out_stride_map = list(stl.stride_map)
     out_device_size[-1] = out_eps
+    if ea == ElementArrangement.QFP8CH:
+        print(
+            f"[QFPCH] stl.device_size={list(stl.device_size)} "
+            f"stl.stride_map={list(stl.stride_map)} "
+            f"in_eps={in_eps} out_eps={out_eps}",
+            flush=True,
+        )
     # Rescale the first non-stick dim that indexes whole sticks (stride == the
     # input stick depth) by the stick-depth ratio. A staggered/sparse layout
     # (e.g. the DL16_TO_FP32 restoration operand, whose stride_map carries
@@ -357,6 +364,11 @@ def _rescale_stl_for_dtype(
             out_device_size[i] = stl.device_size[i] * in_eps // out_eps
             out_stride_map[i] = out_eps
             break
+    if ea == ElementArrangement.QFP8CH:
+        print(
+            f"[QFPCH] -> out_device_size={out_device_size} out_stride_map={out_stride_map}",
+            flush=True,
+        )
     return SpyreTensorLayout(
         out_device_size,
         out_stride_map,
@@ -779,17 +791,81 @@ def find_stick_compatible_input_layout(
         if (coords := try_device_coordinates(stl, arg.dep, None)) is not None
     ]
 
+    # TEMP DEBUG: trace candidates and pass selection for the fp8 BMM inputs.
+    if reduction_type == BATCH_MATMUL_FP8_OP:
+        print(
+            f"[FSCIL] label={label} reduction_var={reduction_var} "
+            f"n_candidates={len(candidates)}",
+            flush=True,
+        )
+        for j, (stl, dc) in enumerate(candidates):
+            print(
+                f"[FSCIL]   cand{j} device_size={list(stl.device_size)} "
+                f"stride_map={list(stl.stride_map)} "
+                f"arrangement={stl.element_arrangement} "
+                f"dev_coords={[str(c) for c in dc]} "
+                f"stick_has_redvar={reduction_var in dc[-1].free_symbols}",
+                flush=True,
+            )
+
     # Pass 1: already stick-compatible.
     # stick_compatible() checks cross-tensor compatibility; here we only need
     # to know if this input's stick coord already carries the target loop variable.
-    for stl, dev_coords in candidates:
+    for j, (stl, dev_coords) in enumerate(candidates):
         if reduction_var in dev_coords[-1].free_symbols:
+            if reduction_type == BATCH_MATMUL_FP8_OP:
+                print(
+                    f"[FSCIL]   -> PASS1 picked cand{j} "
+                    f"arrangement={stl.element_arrangement}",
+                    flush=True,
+                )
+            # For the activation input (label="x") of a FP8 BMM, the hardware
+            # assigns a multi-slot 2D-stick tiled layout to the FP16 input, and
+            # qfp8ch inherits that — producing a device_size that does NOT map
+            # cleanly to the 4 loop variables (H, M, K + B=1 skipped).
+            # The result: wrong dim_order and wrong strides in the SDSC.
+            #
+            # Fix: build a 3-slot row-major STANDARD STL directly from the host
+            # FixedLayout, dropping the trivial B=1 outer dim (skipped by
+            # compute_coordinates anyway). This gives:
+            #   device_size = [H, M, K]   stride_map = [host_H_stride, host_M_stride, 1]
+            # so compute_coordinates maps:
+            #   c0 (step=host_H_stride) -> slot0 (H)
+            #   c1 (step=host_M_stride) -> slot1 (M)
+            #   c3 (step=1)             -> slot2  (stick / K)
+            # producing the correct dim_order and strides in superdsc.py.
+            if (
+                reduction_type == BATCH_MATMUL_FP8_OP
+                and label == "x"
+                and stl.element_arrangement == ElementArrangement.QFP8CH
+            ):
+                # Drop leading size=1 dims so only the meaningful dims remain.
+                host_sizes = [concretize_expr(s) for s in arg.layout.size]
+                host_strides = [concretize_expr(s) for s in arg.layout.stride]
+                # Filter out size-1 outer dims (B=1), keep the inner dims.
+                # The last entry is the stick dim (K); keep stride=1 as-is.
+                dev_size = [s for s in host_sizes if s != 1]
+                dev_stride = [
+                    st for s, st in zip(host_sizes, host_strides) if s != 1
+                ]
+                standard_stl = SpyreTensorLayout(
+                    dev_size,
+                    dev_stride,
+                    get_device_dtype(arg.layout.dtype),
+                    ElementArrangement.STANDARD,
+                )
+                print(
+                    f"[FSCIL_FP8_ACT] built STANDARD x_req_stl "
+                    f"dev_size={dev_size} dev_stride={dev_stride}",
+                    flush=True,
+                )
+                return standard_stl
             return stl
 
     # Pass 2: can be restickified — find the resolvable device coord for reduction_var
     # and use it as target_stick_expr for compute_restickify_target_layout.
     arg_host_coords = host_coordinates(arg.layout, arg.dep, None)
-    for stl, dev_coords in candidates:
+    for j, (stl, dev_coords) in enumerate(candidates):
         target_stick_expr = _dev_coord_for_var(
             dev_coords, arg_host_coords, reduction_var
         )
@@ -799,6 +875,15 @@ def find_stick_compatible_input_layout(
             stl, arg.layout, target_stick_expr, arg_host_coords, dev_coords
         )
         if result is not None:
+            if reduction_type == BATCH_MATMUL_FP8_OP:
+                print(
+                    f"[FSCIL]   -> PASS2 restickified from cand{j} "
+                    f"target_stick_expr={target_stick_expr} "
+                    f"result device_size={list(result.device_size)} "
+                    f"stride_map={list(result.stride_map)} "
+                    f"arrangement={result.element_arrangement}",
+                    flush=True,
+                )
             return result
 
     raise Unsupported(
@@ -840,9 +925,76 @@ def _matmul_layouts(
     reduction_var = find_reduction_var(x.dep, output_dep)
     generated_var = find_matmul_generated_var(y.dep, x.dep, output_dep)
 
-    x_req_stl = find_stick_compatible_input_layout(
-        x, reduction_var, data.reduction_type, "x"
-    )
+    if data.reduction_type == BATCH_MATMUL_FP8_OP:
+        print(
+            f"[MATMUL_LAYOUTS] op={data.reduction_type} "
+            f"reduction_var={reduction_var} generated_var={generated_var}",
+            flush=True,
+        )
+        print(
+            f"[INPUT_PATH]  x.dep={x.dep.name}  "
+            f"x.layout.size={list(x.layout.size)}  x.layout.stride={list(x.layout.stride)}  "
+            f"x.dep.index={x.dep.index}",
+            flush=True,
+        )
+        for j, stl in enumerate(x.layouts):
+            print(
+                f"[INPUT_PATH]    cand{j} device_size={list(stl.device_size)} "
+                f"stride_map={list(stl.stride_map)} "
+                f"arrangement={stl.element_arrangement}",
+                flush=True,
+            )
+        print(
+            f"[KERNEL_PATH] y.dep={y.dep.name}  "
+            f"y.layout.size={list(y.layout.size)}  y.layout.stride={list(y.layout.stride)}  "
+            f"y.dep.index={y.dep.index}",
+            flush=True,
+        )
+        for j, stl in enumerate(y.layouts):
+            print(
+                f"[KERNEL_PATH]   cand{j} device_size={list(stl.device_size)} "
+                f"stride_map={list(stl.stride_map)} "
+                f"arrangement={stl.element_arrangement}",
+                flush=True,
+            )
+        print(
+            f"[OUTPUT_PATH] output.size={list(output.size)}  "
+            f"output.stride={list(output.stride)}  "
+            f"out_coords={[str(c) for c in out_coords]}",
+            flush=True,
+        )
+
+    # For FP8 BMM activation (x), FSCIL cannot find the stick via dep.ranges because
+    # the reduction variable (K=d3) is absent from dep.ranges — it is a reduction dim,
+    # not an output loop var.  concretize_index zeros it out, so dev_coords[-1] never
+    # carries K and PASS1 never fires.  PASS2 then produces a restickified result
+    # derived from the hardware's multi-slot 2D-stick tiled layout, which has H and M
+    # scrambled.
+    #
+    # Instead: build the required STL directly from the host FixedLayout.
+    # Drop size=1 outer dims (B) — compute_coordinates skips them anyway.
+    # Result: device_size=[H,M,K]  stride_map=[host_H_stride, host_M_stride, 1]
+    # This maps cleanly to the loop vars and gives correct dim_order/strides in SDSC.
+    if data.reduction_type == BATCH_MATMUL_FP8_OP:
+        _host_sizes = [concretize_expr(s) for s in x.layout.size]
+        _host_strides = [concretize_expr(s) for s in x.layout.stride]
+        _dev_size = [s for s in _host_sizes if s != 1]
+        _dev_stride = [st for s, st in zip(_host_sizes, _host_strides) if s != 1]
+        x_req_stl = SpyreTensorLayout(
+            _dev_size,
+            _dev_stride,
+            get_device_dtype(x.layout.dtype),
+            ElementArrangement.STANDARD,
+        )
+        print(
+            f"[INPUT_PATH] FP8 x_req_stl (direct) "
+            f"dev_size={_dev_size} dev_stride={_dev_stride}",
+            flush=True,
+        )
+    else:
+        x_req_stl = find_stick_compatible_input_layout(
+            x, reduction_var, data.reduction_type, "x"
+        )
     y_req_stl = find_stick_compatible_input_layout(
         y, generated_var, data.reduction_type, "y"
     )
@@ -867,6 +1019,27 @@ def _matmul_layouts(
     c_stride = [concretize_expr(s) for s in output.stride]
 
     out_stl = SpyreTensorLayout(c_size, c_stride, output.dtype, out_dim_order)
+
+    if data.reduction_type == BATCH_MATMUL_FP8_OP:
+        print(
+            f"[INPUT_PATH]  x_req_stl device_size={list(x_req_stl.device_size)} "
+            f"stride_map={list(x_req_stl.stride_map)} "
+            f"arrangement={x_req_stl.element_arrangement}",
+            flush=True,
+        )
+        print(
+            f"[KERNEL_PATH] y_req_stl device_size={list(y_req_stl.device_size)} "
+            f"stride_map={list(y_req_stl.stride_map)} "
+            f"arrangement={y_req_stl.element_arrangement}",
+            flush=True,
+        )
+        print(
+            f"[OUTPUT_PATH] out_stl device_size={list(out_stl.device_size)} "
+            f"stride_map={list(out_stl.stride_map)} "
+            f"dim_order={out_dim_order} "
+            f"arrangement={out_stl.element_arrangement}",
+            flush=True,
+        )
 
     op.restick_cost_fn = FixedInOutNode.from_args(
         [x, y], out_stl, [x_req_stl, y_req_stl], op
@@ -1494,6 +1667,14 @@ def propagate_spyre_tensor_layouts(
         for name, real_input in zip(graph.graph_input_names, V.get_real_inputs()):
             if isinstance(real_input, torch.Tensor):
                 stl = real_input.device_tensor_layout()
+                print(
+                    f"[INPUT_STL] {name} shape={list(real_input.shape)} "
+                    f"dtype={real_input.dtype} "
+                    f"device_size={list(stl.device_size) if stl else None} "
+                    f"stride_map={list(stl.stride_map) if stl else None} "
+                    f"arrangement={stl.element_arrangement if stl else None}",
+                    flush=True,
+                )
                 if stl is None:
                     # A CPU tensor lifted as a graph input, or a host tensor
                     # feeding a FallbackKernel has no Spyre layout;

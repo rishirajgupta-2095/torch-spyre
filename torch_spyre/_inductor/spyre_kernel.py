@@ -754,6 +754,17 @@ class SpyreKernel(Kernel[CSEVariable]):
             index,
             self.indirect_sizes,
         )
+        # DEBUG: trace device_coords for every tensor arg in batchmatmulfp8
+        if "matmul" in str(getattr(self.current_node.node, "reduction_type", "")):
+            print(
+                f"[CREATE_TENSOR_ARG] {'INPUT' if is_input else 'OUTPUT'} name={name} "
+                f"index={index} "
+                f"device_size={list(tensor.layout.device_layout.device_size)} "
+                f"stride_map={list(tensor.layout.device_layout.stride_map)} "
+                f"arrangement={tensor.layout.device_layout.element_arrangement} "
+                f"device_coords={[str(c) for c in device_coords]}",
+                flush=True,
+            )
         device_tile_advance_expr = self._general_tile_advance(tensor, is_input, name)
         tensor_arg = TensorArg(
             is_input,

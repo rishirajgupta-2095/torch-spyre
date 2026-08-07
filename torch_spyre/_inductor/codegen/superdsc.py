@@ -734,10 +734,18 @@ def _create_sdsc_tensors(
         dtype_stick_size = arg.device_dtype.elems_per_stick()
         layout_stick_size = [dtype_stick_size]
         if is_fp8_mm_kernel_arg:
-            # FP8 KERNEL needs 2D stick: [2, stick_size/2]
+            # FP8 KERNEL needs a 2D stick [2, stick_size/2] packing the
+            # contraction (in) and output (out) dims. Selecting dim_order[-2:]
+            # positionally is only correct for a 2D kernel ([in, out]); for a
+            # batched matmul a batch dim sits between them (e.g. [in, x, out]),
+            # so [-2:] == [x, out] would pack the batch dim and produce a kernel
+            # slice DeepTools cannot map. Select in/out by label instead.
             layout_stick_size = [2, dtype_stick_size // 2]
-            # Use the last two dimensions from dim_order for 2D stick
-            effective_stick = dim_order[-2:]
+            in_sym, out_sym = Symbol("in"), Symbol("out")
+            if in_sym in dim_order and out_sym in dim_order:
+                effective_stick = [in_sym, out_sym]
+            else:
+                effective_stick = dim_order[-2:]
 
         if has_indirect_access:
             label = get_indirect_layout_label(
@@ -758,6 +766,23 @@ def _create_sdsc_tensors(
                 effective_stick,
                 layout_stick_size,
                 layout_labels,
+            )
+
+        # TEMP DEBUG: dump the stick layout for matmul tensors so we can compare
+        # against the SuperDSC-Bundle spec (Input1 [in=128], Input2/kernel
+        # [in=2, out=64], Output [out=64]). Remove once 4D FP8 is validated.
+        if _is_matmul(op_spec.op):
+            print(
+                f"[STICK] {op_spec.op} arg{i} dt={arg.device_dtype} "
+                f"dim_order={[str(d) for d in dim_order]} "
+                f"stick={[str(d) for d in effective_stick]} "
+                f"stick_size={layout_stick_size} "
+                f"device_size={list(arg.device_size)} "
+                f"device_coords={[str(c) for c in arg.device_coordinates]} "
+                f"strides={ {str(k): v for k, v in strides.items()} } "
+                f"stride_dim_order={[str(d) for d in stride_dim_order]} "
+                f"fp8_kernel={is_fp8_mm_kernel_arg}",
+                flush=True,
             )
 
         # Index tensors carry 32-bit integer indices; re-label as SENUINT32 since
@@ -975,6 +1000,13 @@ def parse_op_spec(op_spec: OpSpec) -> tuple["SDSCSpec", "dict"]:
         "symbol mapping: %s",
         ", ".join(f"{k} -> {v}" for k, v in symbol_mapping.items()),
     )
+    if is_matmul and "fp8" in op_spec.op:
+        print(
+            f"[SYMBOL_MAP] op={op_spec.op} ndim={ndim} "
+            f"iteration_space={list(op_spec.iteration_space.keys())} "
+            f"mapping={{ {', '.join(f'{k}->{v}' for k, v in symbol_mapping.items())} }}",
+            flush=True,
+        )
 
     # For symbolic dims, use the max from symbolic_dim_bounds as the iteration-space size
     # so the emitted SDSC JSON is generated max sizes baked in, not symbols.

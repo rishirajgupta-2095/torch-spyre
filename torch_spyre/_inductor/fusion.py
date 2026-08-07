@@ -12,13 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from torch._inductor.ir import Reduction
 from torch._inductor.scheduler import (
     BaseSchedulerNode,
     FusedSchedulerNode,
     SchedulerNode,
 )
 from . import config
-from .constants import DEVICE_NAME
+from .constants import BATCH_MATMUL_FP8_OP, DEVICE_NAME
 from .scheduler import CountedLoopSchedulerNode
 
 
@@ -38,10 +39,28 @@ def _is_spyre_node(node: BaseSchedulerNode) -> bool:
     return device is not None and device.type == DEVICE_NAME
 
 
+def _is_fp8_matmul(n: BaseSchedulerNode) -> bool:
+    """Return True if n is a batchmatmulfp8 reduction node."""
+    return (
+        isinstance(n, SchedulerNode)
+        and n.node is not None
+        and isinstance(n.node.data, Reduction)
+        and n.node.data.reduction_type == BATCH_MATMUL_FP8_OP
+    )
+
+
 def spyre_fuse_nodes(nodes: list[BaseSchedulerNode]) -> list[BaseSchedulerNode]:
     """
     Fuse nodes together to form kernels without changing their order.
     Each kernel will be compiled into a single SuperDSC Bundle.
+
+    batchmatmulfp8 must not be fused with upstream pointwise ops whose tensors
+    have a different rank. DeepTools assigns dim labels per-op independently;
+    when a pointwise of rank R and a BMM of rank R+1 share the same SDSC, the
+    global layout merge produces label conflicts (e.g. multiple "mb" or "y"
+    candidates) that cause error 2497. Force a bundle boundary immediately
+    before every batchmatmulfp8 node so its producer (e.g. qfp8wt) always
+    lands in a preceding SDSC.
     """
     if len(nodes) == 0:
         return nodes
@@ -58,6 +77,11 @@ def spyre_fuse_nodes(nodes: list[BaseSchedulerNode]) -> list[BaseSchedulerNode]:
         if isinstance(n, (SchedulerNode, CountedLoopSchedulerNode)) and _is_spyre_node(
             n
         ):
+            # batchmatmulfp8 must always start a fresh bundle.
+            if _is_fp8_matmul(n) and cur_nodes:
+                if fused := _make_fused(cur_nodes):
+                    fused_nodes.append(fused)
+                cur_nodes = []
             cur_nodes.append(n)
         else:
             # Non-Spyre nodes (Fallback nodes, CPU SchedulerNodes) force a
