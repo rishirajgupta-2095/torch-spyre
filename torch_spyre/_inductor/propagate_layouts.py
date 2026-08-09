@@ -541,8 +541,8 @@ def find_stick_compatible_input_layout(
     """
     arg_dev_coords = [device_coordinates(stl, arg.dep, None) for stl in arg.layouts]
 
-    # TEMP DEBUG: trace which candidate/pass wins for the fp8 kernel (y) input.
-    if reduction_type == BATCH_MATMUL_FP8_OP and label == "y":
+    # TEMP DEBUG: trace candidates and pass selection for the fp8 BMM inputs.
+    if reduction_type == BATCH_MATMUL_FP8_OP:
         print(
             f"[FSCIL] label={label} reduction_var={reduction_var} "
             f"n_candidates={len(arg.layouts)}",
@@ -553,7 +553,8 @@ def find_stick_compatible_input_layout(
                 f"[FSCIL]   cand{j} device_size={list(stl.device_size)} "
                 f"stride_map={list(stl.stride_map)} "
                 f"arrangement={stl.element_arrangement} "
-                f"dev_coords={[str(c) for c in dc]}",
+                f"dev_coords={[str(c) for c in dc]} "
+                f"stick_has_redvar={reduction_var in dc[-1].free_symbols}",
                 flush=True,
             )
 
@@ -562,29 +563,55 @@ def find_stick_compatible_input_layout(
     # to know if this input's stick coord already carries the target loop variable.
     for j, (stl, dev_coords) in enumerate(zip(arg.layouts, arg_dev_coords)):
         if reduction_var in dev_coords[-1].free_symbols:
-            if reduction_type == BATCH_MATMUL_FP8_OP and label == "y":
-                print(f"[FSCIL]   -> PASS1 picked cand{j}", flush=True)
-            # For the activation input (label="x") of a FP8 BMM, QFP8CH halves
-            # the M device_size slot (fp16→fp8 eps doubling folds M).  That
-            # produces a wrong stride for M in the SDSC, because M is *not*
-            # reduced — it is a free loop variable.  Use a STANDARD STL built
-            # from the host FixedLayout instead: device_size preserves full M,
-            # stick carries K at the correct 128-eps size.
+            if reduction_type == BATCH_MATMUL_FP8_OP:
+                print(
+                    f"[FSCIL]   -> PASS1 picked cand{j} "
+                    f"arrangement={stl.element_arrangement}",
+                    flush=True,
+                )
+            # For the activation input (label="x") of a FP8 BMM, the hardware
+            # assigns a multi-slot 2D-stick tiled layout to the FP16 input, and
+            # qfp8ch inherits that — producing a device_size that does NOT map
+            # cleanly to the 4 loop variables (H, M, K + B=1 skipped).
+            # The result: wrong dim_order and wrong strides in the SDSC.
+            #
+            # Fix: build a 3-slot row-major STANDARD STL directly from the host
+            # FixedLayout, dropping the trivial B=1 outer dim (skipped by
+            # compute_coordinates anyway). This gives:
+            #   device_size = [H, M, K]   stride_map = [host_H_stride, host_M_stride, 1]
+            # so compute_coordinates maps:
+            #   c0 (step=host_H_stride) -> slot0 (H)
+            #   c1 (step=host_M_stride) -> slot1 (M)
+            #   c3 (step=1)             -> slot2  (stick / K)
+            # producing the correct dim_order and strides in superdsc.py.
             if (
                 reduction_type == BATCH_MATMUL_FP8_OP
                 and label == "x"
                 and stl.element_arrangement == ElementArrangement.QFP8CH
             ):
-                c_size = [concretize_expr(s) for s in arg.layout.size]
-                c_stride = [concretize_expr(s) for s in arg.layout.stride]
-                ndim = len(c_size)
-                # reduction_var sits on the last host dim (K); put it on the stick.
+                # Drop leading size=1 dims so only the meaningful dims remain.
+                host_sizes = [
+                    concretize_expr(s) for s in arg.layout.size
+                ]
+                host_strides = [
+                    concretize_expr(s) for s in arg.layout.stride
+                ]
+                # Filter out size-1 outer dims (B=1), keep the inner dims.
+                # The last entry is the stick dim (K); keep stride=1 as-is.
+                dev_size = [s for s in host_sizes if s != 1]
+                dev_stride = [
+                    st for s, st in zip(host_sizes, host_strides) if s != 1
+                ]
                 standard_stl = SpyreTensorLayout(
-                    c_size,
-                    c_stride,
-                    arg.layout.dtype,
-                    list(range(ndim)),
+                    dev_size,
+                    dev_stride,
+                    get_device_dtype(arg.layout.dtype),
                     ElementArrangement.STANDARD,
+                )
+                print(
+                    f"[FSCIL_FP8_ACT] built STANDARD x_req_stl "
+                    f"dev_size={dev_size} dev_stride={dev_stride}",
+                    flush=True,
                 )
                 return standard_stl
             return stl
@@ -602,7 +629,7 @@ def find_stick_compatible_input_layout(
             stl, arg.layout, target_stick_expr, arg_host_coords, dev_coords
         )
         if result is not None:
-            if reduction_type == BATCH_MATMUL_FP8_OP and label == "y":
+            if reduction_type == BATCH_MATMUL_FP8_OP:
                 print(
                     f"[FSCIL]   -> PASS2 restickified from cand{j} "
                     f"target_stick_expr={target_stick_expr} "
@@ -691,9 +718,37 @@ def _matmul_layouts(
             flush=True,
         )
 
-    x_req_stl = find_stick_compatible_input_layout(
-        x, reduction_var, data.reduction_type, "x"
-    )
+    # For FP8 BMM activation (x), FSCIL cannot find the stick via dep.ranges because
+    # the reduction variable (K=d3) is absent from dep.ranges — it is a reduction dim,
+    # not an output loop var.  concretize_index zeros it out, so dev_coords[-1] never
+    # carries K and PASS1 never fires.  PASS2 then produces a restickified result
+    # derived from the hardware's multi-slot 2D-stick tiled layout, which has H and M
+    # scrambled.
+    #
+    # Instead: build the required STL directly from the host FixedLayout.
+    # Drop size=1 outer dims (B) — compute_coordinates skips them anyway.
+    # Result: device_size=[H,M,K]  stride_map=[host_H_stride, host_M_stride, 1]
+    # This maps cleanly to the loop vars and gives correct dim_order/strides in SDSC.
+    if data.reduction_type == BATCH_MATMUL_FP8_OP:
+        _host_sizes = [concretize_expr(s) for s in x.layout.size]
+        _host_strides = [concretize_expr(s) for s in x.layout.stride]
+        _dev_size = [s for s in _host_sizes if s != 1]
+        _dev_stride = [st for s, st in zip(_host_sizes, _host_strides) if s != 1]
+        x_req_stl = SpyreTensorLayout(
+            _dev_size,
+            _dev_stride,
+            get_device_dtype(x.layout.dtype),
+            ElementArrangement.STANDARD,
+        )
+        print(
+            f"[INPUT_PATH] FP8 x_req_stl (direct) "
+            f"dev_size={_dev_size} dev_stride={_dev_stride}",
+            flush=True,
+        )
+    else:
+        x_req_stl = find_stick_compatible_input_layout(
+            x, reduction_var, data.reduction_type, "x"
+        )
     y_req_stl = find_stick_compatible_input_layout(
         y, generated_var, data.reduction_type, "y"
     )
@@ -787,6 +842,19 @@ def _multi_arg_pointwise_layouts(
                 can_use_same_layout = False
                 break
 
+    # TEMP DEBUG: trace the layout decision for every multi-arg pointwise op
+    # (this is where `input * inv_scale` inside quantize_fp8_with_scale lands).
+    print(
+        f"[MUL_LAYOUT] op={op.get_name()} can_use_same_layout={can_use_same_layout} "
+        f"args=" + ", ".join(
+            f"[{a.dep.name} size={list(a.layout.size)} "
+            f"layout0_device_size={list(next(iter(a.layouts)).device_size) if a.layouts else None} "
+            f"layout0_stride_map={list(next(iter(a.layouts)).stride_map) if a.layouts else None}]"
+            for a in args
+        ),
+        flush=True,
+    )
+
     stick_size = get_elem_in_stick(output.dtype)
     c_size = [concretize_expr(s) for s in output.size]
     c_stride = [concretize_expr(s) for s in output.stride]
@@ -850,6 +918,15 @@ def _multi_arg_pointwise_layouts(
         logger.info(
             f"Multi-arg pointwise ({op.get_name()}): producing {len(results)} candidate output layouts."
         )
+
+    print(
+        f"[MUL_LAYOUT] -> op={op.get_name()} chose "
+        + ", ".join(
+            f"[device_size={list(r.device_size)} stride_map={list(r.stride_map)}]"
+            for r in results
+        ),
+        flush=True,
+    )
 
     op.restick_cost_fn = AllSameNode.from_args(args, results, output_dep, op)
     return results

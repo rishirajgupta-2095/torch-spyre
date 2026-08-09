@@ -897,8 +897,13 @@ def where_scalar_decomp(condition, self, other):
 def spyre_quantize_fp8_with_scale(
     input: torch.Tensor, scale: torch.Tensor
 ) -> torch.Tensor:
-    inv_scale = torch.reciprocal(scale)
-    x_scaled = input * inv_scale
+    # TEMP DEBUG: bypass the scale multiply to isolate its effect on the
+    # activation's device layout. ONLY valid because our diagnostic scripts
+    # use scale=1.0 (mathematically a no-op here) -- MUST be reverted before
+    # any real (scale != 1.0) usage, since this silently drops the scaling.
+    # inv_scale = torch.reciprocal(scale)
+    # x_scaled = input * inv_scale
+    x_scaled = input
     x_clamped = torch.ops.spyre.clamp(x_scaled, FP8_E4M3FN_MIN, FP8_E4M3FN_MAX)
     return torch.ops.spyre.qfp8ch(x_clamped)
 
