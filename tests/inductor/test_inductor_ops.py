@@ -489,6 +489,37 @@ SCALED_MM_TESTS = {
     for shape in _SCALED_MM_SHAPES
     for sa, sb, b in _SCALED_MM_PARAMS
 }
+
+# spyre.scaled_bmm: FP8 batched matmul (batched counterpart of scaled_mm).
+# (mat1_shape, mat2_shape) with mat1 [*batch, M, K] @ mat2 [*batch, K, N].
+# K is stick-aligned (a multiple of 64). Scales are per-tensor and, like
+# spyre.scaled_mm, are applied outside the op, so they are kept at 1.0.
+_SCALED_BMM_SHAPES = {
+    # 3D @ 3D: [B, M, K] @ [B, K, N]
+    "3d_4x64x128x64": ((4, 64, 128), (4, 128, 64)),
+    "3d_2x64x128x128": ((2, 64, 128), (2, 128, 128)),
+    # 4D @ 4D: [B, H, M, K] @ [B, H, K, N]  (attention QK: Q @ Kᵀ)
+    "4d_1x32x64x128x64": ((1, 32, 64, 128), (1, 32, 128, 64)),
+    "4d_2x8x64x128x128": ((2, 8, 64, 128), (2, 8, 128, 128)),
+    # BERT-base attention shapes (12 heads, seq 384, head_dim 64), the two
+    # matmuls DeepTools runs per encoder layer.  These are the reference
+    # shapes the working BERT SuperDSC bundle was captured from.
+    #   QK: Q[1,12,384,64] @ Kᵀ[1,12,64,384] -> scores[1,12,384,384]
+    #   AV: attn[1,12,384,384] @ V[1,12,384,64] -> ctx[1,12,384,64]
+    # QK's K=64 is half an FP8 stick (128 elems); AV's K=384 is 3 full sticks.
+    "4d_bert_qk_1x12x384x64x384": ((1, 12, 384, 64), (1, 12, 64, 384)),
+    "4d_bert_av_1x12x384x384x64": ((1, 12, 384, 384), (1, 12, 384, 64)),
+}
+
+SCALED_BMM_TESTS = {
+    key: (
+        torch.rand(mat1_shape, dtype=torch.float16),
+        torch.rand(mat2_shape, dtype=torch.float16),
+        torch.tensor(1.0, dtype=torch.float16),
+        torch.tensor(1.0, dtype=torch.float16),
+    )
+    for key, (mat1_shape, mat2_shape) in _SCALED_BMM_SHAPES.items()
+}
 FP32_EPS = torch.finfo(torch.float32).eps  # 1.1920928955078125e-07
 FP16_EPS = torch.finfo(torch.float16).eps  # 0.0009765625
 
@@ -4811,6 +4842,9 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         ("test_fp8_scaled_mm", "test_fp8_scaled_mm_cpu"): {
             "param_sets": SCALED_MM_TESTS,
         },
+        ("test_fp8_scaled_bmm", "test_fp8_scaled_bmm_cpu"): {
+            "param_sets": SCALED_BMM_TESTS,
+        },
         (
             "test_multiops_split",
             "test_view_permute_mul",
@@ -6915,6 +6949,36 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
 
         compare_with_pytorch(
             spyre_fn, pytorch_fn, a, b, scale_a, scale_b, bias, atol=0.1, rtol=0.1
+        )
+
+    def test_fp8_scaled_bmm_cpu(self, a, b, scale_a, scale_b):
+        """Test spyre.scaled_bmm (FP8 batched matmul) for 3D and 4D inputs."""
+
+        def spyre_fn(a, b, scale_a, scale_b):
+            q_a = torch.ops.spyre.quantize_fp8_with_scale(a, scale_a)
+            q_b = torch.ops.spyre.quantize_weight_fp8_with_scale(b, scale_b)
+            # scaled_bmm is the raw FP8 matmul; scales are applied outside it,
+            # matching how scaled_mm_decomp handles spyre.scaled_mm.
+            out = torch.ops.spyre.scaled_bmm(q_a, q_b, out_dtype=torch.float16)
+            return out * (scale_a * scale_b)
+
+        def pytorch_fn(a, b, scale_a, scale_b):
+            q_a = (
+                (a / scale_a)
+                .clamp(-448.0, 448.0)
+                .to(torch.float8_e4m3fn)
+                .to(torch.float16)
+            )
+            q_b = (
+                (b / scale_b)
+                .clamp(-448.0, 448.0)
+                .to(torch.float8_e4m3fn)
+                .to(torch.float16)
+            )
+            return (q_a @ q_b) * (scale_a * scale_b)
+
+        compare_with_pytorch(
+            spyre_fn, pytorch_fn, a, b, scale_a, scale_b, atol=0.1, rtol=0.1
         )
 
     def test_is_nonzero_cpu(self, *args):
