@@ -1155,6 +1155,22 @@ def _create_sdsc_tensors(
 
     missing_dim = None
     sdsc_args: list[SDSCArgs] = []
+    # Dims present in the op's output. A matmul's reduction dim is exactly the
+    # one that appears in an input's dim_order but not here, which is what the
+    # FP8 KERNEL's 2D stick needs to name alongside its stick dim (see the
+    # is_fp8_mm_kernel_arg branch below). Computed once: the output arg is the
+    # single non-input TensorArg.
+    # _out_arg = next((a for a in op_spec.args if not a.is_input), None)
+    # _output_dims: set = set()
+    # if _out_arg is not None:
+    #     _out_dim_order, _ = _get_device_dim_order(_out_arg, symbol_mapping, op_spec)
+    #     _output_dims = set(_out_dim_order)
+
+    # try3
+    # Labels of the innermost two iteration dims -- the weight's K and N. The
+    # FP8 KERNEL's 2D stick spans exactly these (see is_fp8_mm_kernel_arg below).
+    _it_syms = list(op_spec.iteration_space)
+    _kn_labels = {symbol_mapping.get(s, s) for s in _it_syms[-2:]}
 
     for i, arg in enumerate(op_spec.args):
         is_fp8_mm_kernel_arg = arg.element_arrangement == ElementArrangement.QFP8WT
@@ -1392,12 +1408,86 @@ def _create_sdsc_tensors(
         # Special handling for FP8 matmul KERNEL tensor
         dtype_stick_size = arg.device_dtype.elems_per_stick()
         layout_stick_size = [dtype_stick_size]
+        ##original 
+        # if is_fp8_mm_kernel_arg:
+        #     # FP8 KERNEL needs 2D stick: [2, stick_size/2]
+        #     layout_stick_size = [2, dtype_stick_size // 2]
+        #     # Use the last two dimensions from dim_order for 2D stick
+        #     effective_stick = dim_order[-2:]
+
+        # case 2:
+
+        # if is_fp8_mm_kernel_arg:
+        #     # FP8 KERNEL needs 2D stick: [2, stick_size/2]
+        #     layout_stick_size = [2, dtype_stick_size // 2]
+        #     # The 2D stick packs 2 reduction-dim values x 64 stick-dim values,
+        #     # so stickDimOrder_ must name [reduction_dim, stick_dim].
+        #     #
+        #     # This used to slice dim_order[-2:] positionally. That coincides
+        #     # with [reduction, stick] only while the stick dim is last, which
+        #     # holds at rank 2 and 3 but not at rank 4: there dim_order is
+        #     # [mb, out, y, x] with the stick at index 1, so the slice emitted
+        #     # ["y", "x"] -- two dims that are not the stick -- and DeepTools
+        #     # could not map the layout.
+        #     real_stick = effective_stick[0]
+        #     reduction_dim = next(
+        #         (d for d in dim_order if d is not real_stick and d not in _output_dims),
+        #         None,
+        #     )
+        #     if real_stick is not None and reduction_dim is not None:
+        #         effective_stick = [reduction_dim, real_stick]
+        #     else:
+        #         # No identifiable reduction dim (non-matmul consumer, or the
+        #         # stick is unset); keep the historical positional behaviour.
+        #         effective_stick = dim_order[-2:]
+
+        # try3 
+        # breakpoint()
+        # if is_fp8_mm_kernel_arg:
+        #     # FP8 KERNEL needs 2D stick: [2, stick_size/2]
+        #     layout_stick_size = [2, dtype_stick_size // 2]
+        #     # The 2D stick packs 2 values of the weight's second-innermost host
+        #     # dim (K) against 64 of its innermost (N, the stick dim), so
+        #     # stickDimOrder_ must name exactly those two, in dim_order order.
+        #     #
+        #     # This used to slice dim_order[-2:] positionally, which coincides
+        #     # with {K, N} only while both are last in dim_order. That holds at
+        #     # rank 2 (dim_order [mb, out] -> ["mb","out"]) and rank 3
+        #     # ([mb, out, x] -> ["out","x"]), but not at rank 4: there dim_order
+        #     # is [mb, out, y, x] and the slice yields ["y","x"], dropping the
+        #     # stick dim "out" entirely, and DeepTools cannot map the layout.
+        #     _pair = [d for d in dim_order if d in _kn_labels]
+        #     if len(_pair) == 2:
+        #         effective_stick = _pair
+        #     else:
+        #         # K/N not both present (e.g. a rank-1 weight); keep the
+        #         # historical positional behaviour.
+        #         effective_stick = dim_order[-2:]
+        # try4:
         if is_fp8_mm_kernel_arg:
             # FP8 KERNEL needs 2D stick: [2, stick_size/2]
             layout_stick_size = [2, dtype_stick_size // 2]
-            # Use the last two dimensions from dim_order for 2D stick
-            effective_stick = dim_order[-2:]
-
+            # stickDimOrder_ must be [companion_dim, stick_dim] -- the real
+            # stick dim always LAST, regardless of where it falls in dim_order.
+            # Confirmed against two independent references: a working BERT
+            # qfp8wt SDSC (dim_order [j,out,y,x] -> stickDimOrder_ ["j","out"])
+            # and Swagath's correction for this 4D case (dim_order
+            # [mb,out,y,x] -> stickDimOrder_ ["y","out"], NOT ["out","y"]).
+            #
+            # This used to slice dim_order[-2:] positionally, which coincides
+            # with {companion, stick} in the right order only by accident at
+            # low rank. At rank 4 dim_order is [mb,out,y,x]: the slice yields
+            # ["y","x"] (drops the stick "out" entirely -> DeepTools can't map
+            # the layout), and even naively picking {out,y} in dim_order's own
+            # order yields ["out","y"] -- stick first, which is also wrong.
+            _pair = [d for d in dim_order if d in _kn_labels]
+            if len(_pair) == 2 and real_stick in _pair:
+                companion = next(d for d in _pair if d is not real_stick)
+                effective_stick = [companion, real_stick]
+            else:
+                # Stick not among the K/N-labeled dims (e.g. a rank-1 weight);
+                # keep the historical positional behaviour.
+                effective_stick = dim_order[-2:]
         if has_indirect_access:
             label = get_indirect_layout_label(
                 i,

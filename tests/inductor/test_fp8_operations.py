@@ -224,6 +224,26 @@ class TestFP8Operations:
             (1, 128, 1024),
             (1, 128, 2048),
             (1, 128, 4096),
+            # 4D attention-shaped. The stick dim is the last one, so its size
+            # relative to 128 decides whether the fp8 stick is full or padded,
+            # and its value decides whether host_stride[dim2] collides with the
+            # fp16 elems-per-stick in the device stride_map. Ordered so each
+            # case reintroduces exactly one degenerate property:
+            #   batch>1, full stick  -> no -1 stride_map entries, no collision
+            (2, 12, 384, 128),
+            #   batch==1             -> adds a -1 (dropped) device dim
+            (1, 12, 384, 128),
+            #   multi-stick          -> num-sticks dim > 1 at fp8
+            (1, 12, 384, 384),
+            #   head_dim == 64       -> fp8 stick only half full, AND
+            #                           host_stride[dim2] == 64 == fp16 stick
+            (1, 12, 384, 64),
+            # Q's shape in 4d_bmm_1x12x128x128x128 / 4d_bmm_2x12x128x128x128 --
+            # step 1 of isolating the scaled_bmm numeric mismatch: confirm
+            # quantize_fp8_with_scale's own output is correct at this exact
+            # shape before suspecting the matmul reduction.
+            (1, 12, 128, 128),
+            (2, 12, 128, 128),
         ],
     )
     def test_quantize_dequantize_fp8_production_shapes(self, shape):
@@ -247,7 +267,79 @@ class TestFP8Operations:
             ).to(torch.float16) * scale
 
         compare_with_pytorch(spyre_fn, pytorch_fn, x, scale, atol=0.5, rtol=0.1)
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            # Kᵀ (matmul KERNEL) shapes at each rank. quantize_weight_fp8_with_scale
+            # decomposes to qfp8wt, which stamps ElementArrangement.QFP8WT and makes
+            # superdsc emit a 2D stick [2, 64] whose stickDimOrder_ is taken
+            # positionally as dim_order[-2:]. That window holds the real stick dim
+            # at rank 2 and 3 but not at rank 4, so these ranks bracket it.
+            (128, 384),
+            (12, 128, 384),
+            (1, 12, 128, 384),
+            # Kᵀ of 4d_aligned_qk_2x12x384x128x384 (B=2: two live batch dims).
+            (2, 12, 128, 384),
+            (2, 12, 128, 128),
+            (1, 12, 128, 128),
+        ],
+        ids=lambda s: "x".join(str(d) for d in s),
+    )
+    def test_quantize_dequantize_weight_fp8_shapes(self, shape):
+        """Test the weight-side FP8 quantizer (qfp8wt) standalone, across ranks.
 
+        Mirrors test_quantize_dequantize_fp8_production_shapes but uses
+        quantize_weight_fp8_with_scale, so the QFP8WT 2D-stick KERNEL layout is
+        exercised without a matmul in the graph.
+        """
+        x = cached_randn(shape, dtype=torch.float16, scale=1.0) * 2.0 + 1.0
+        scale = torch.tensor([1.0], dtype=torch.float16)
+
+        def spyre_fn(x, scale):
+            x_fp8 = torch.ops.spyre.quantize_weight_fp8_with_scale(x, scale)
+            return x_fp8
+
+        def pytorch_fn(x, scale):
+            return (x / scale).clamp(FP8_E4M3FN_MIN, FP8_E4M3FN_MAX).to(
+                torch.float8_e4m3fn
+            ).to(torch.float16) * scale
+
+        compare_with_pytorch(spyre_fn, pytorch_fn, x, scale, atol=0.5, rtol=0.1)
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            (128, 384),
+            (12, 128, 384),
+            (1, 12, 128, 384),
+            (2, 12, 128, 384),
+            (2, 12, 128, 128),
+            (1, 12, 128, 128),
+        ],
+        ids=lambda s: "x".join(str(d) for d in s),
+    )
+    def test_quantize_dequantize_weight_fp8_shapes(self, shape):
+        """Test the weight-side FP8 quantizer (qfp8wt) standalone, across ranks.
+
+        Compares fp8-to-fp8 rather than round-tripping through
+        dequantize_fp8_with_scale: for a QFP8WT tensor, dequantize routes
+        through fp8todl16, which crashes when fused with a plain 64-granule
+        neighbor (see the "Not enough elements to distribute" issue). This
+        keeps the check -- does qfp8wt itself produce correct fp8 values --
+        decoupled from that separate, already-diagnosed bug.
+        """
+        x = cached_randn(shape, dtype=torch.float16, scale=1.0) * 2.0 + 1.0
+        scale = torch.tensor([1.0], dtype=torch.float16)
+
+        def spyre_fn(x, scale):
+            return torch.ops.spyre.quantize_weight_fp8_with_scale(x, scale)
+
+        def pytorch_fn(x, scale):
+            return (x / scale).clamp(FP8_E4M3FN_MIN, FP8_E4M3FN_MAX).to(
+                torch.float8_e4m3fn
+            )
+
+        compare_with_pytorch(spyre_fn, pytorch_fn, x, scale, atol=0.0, rtol=0.0)
+        
     def _run_quantize_dequantize_fp8_test(
         self,
         shape,

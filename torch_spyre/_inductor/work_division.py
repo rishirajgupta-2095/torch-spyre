@@ -332,8 +332,14 @@ def adjust_it_space_for_sticks(
         ):
             # For QFP8WT, last two device dimensions are the 2D stick [2, 64]
             # Both need to be treated as atomic 128-byte units
+            stick_coords = (
+                [td.device_coords[-3], td.device_coords[-1]]
+                if len(td.device_coords) >= 3
+                else td.device_coords[-2:]
+            )
             stick_vars = []
-            for coord in td.device_coords[-2:]:
+            # for coord in td.device_coords[-2:]:
+            for coord in stick_coords:
                 if len(coord.free_symbols) == 1:
                     var = next(iter(coord.free_symbols))
                     if var in adjusted_space:

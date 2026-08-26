@@ -424,6 +424,7 @@ def lower_scaled_bmm(
     mat2,
     out_dtype=None,
 ):
+    breakpoint()
     # FP8 batched matmul: the FP8 dtype checks and BATCH_MATMUL_FP8_OP reduction
     # of lower_scaled_mm, with the batched inner_fn indexing of lower_bmm.
     mat1.realize()
