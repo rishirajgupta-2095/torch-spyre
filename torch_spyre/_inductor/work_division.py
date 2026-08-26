@@ -321,6 +321,31 @@ def _is_qfp8wt_tensor(td: TensorDep) -> bool:
     )
 
 
+# def _get_qfp8wt_split_constraints(
+#     input_tds: list[TensorDep],
+#     output_td: TensorDep,
+# ) -> dict[Symbol, int]:
+#     """Return split constraints (=1) for QFP8WT second stick dimension."""
+#     constraints: dict[Symbol, int] = {}
+#     if not _has_qfp8wt_tensor(input_tds + [output_td]):
+#         return constraints
+
+#     # Kernel tensor (second input for batchmatmul)
+#     if len(input_tds) > 1:
+#         kernel_td = input_tds[1]
+#         if len(kernel_td.device_coords) > 1 and _is_qfp8wt_tensor(kernel_td):
+#             second_stick_vars = kernel_td.device_coords[-2].free_symbols
+#             for var in second_stick_vars:
+#                 constraints[var] = 1
+
+#     # Output tensor
+#     if len(output_td.device_coords) > 1 and _is_qfp8wt_tensor(output_td):
+#         second_stick_vars = output_td.device_coords[-2].free_symbols
+#         for var in second_stick_vars:
+#             constraints[var] = 1
+
+#     return constraints
+
 def _get_qfp8wt_split_constraints(
     input_tds: list[TensorDep],
     output_td: TensorDep,
@@ -330,22 +355,25 @@ def _get_qfp8wt_split_constraints(
     if not _has_qfp8wt_tensor(input_tds + [output_td]):
         return constraints
 
-    # Kernel tensor (second input for batchmatmul)
+    # Kernel tensor (second input for batchmatmul). The 2D stick's num-sticks
+    # dim is device_coords[-3] (see adjust_it_space_for_sticks); [-2] only
+    # coincides with it at low rank -- at rank 4 [-2] is the batch dim.
     if len(input_tds) > 1:
         kernel_td = input_tds[1]
         if len(kernel_td.device_coords) > 1 and _is_qfp8wt_tensor(kernel_td):
-            second_stick_vars = kernel_td.device_coords[-2].free_symbols
+            idx = -3 if len(kernel_td.device_coords) >= 3 else -2
+            second_stick_vars = kernel_td.device_coords[idx].free_symbols
             for var in second_stick_vars:
                 constraints[var] = 1
 
     # Output tensor
     if len(output_td.device_coords) > 1 and _is_qfp8wt_tensor(output_td):
-        second_stick_vars = output_td.device_coords[-2].free_symbols
+        idx = -3 if len(output_td.device_coords) >= 3 else -2
+        second_stick_vars = output_td.device_coords[idx].free_symbols
         for var in second_stick_vars:
             constraints[var] = 1
 
     return constraints
-
 
 def adjust_it_space_for_sticks(
     it_space: dict[Symbol, Expr],
@@ -390,8 +418,14 @@ def adjust_it_space_for_sticks(
         ):
             # For QFP8WT, last two device dimensions are the 2D stick [2, 64]
             # Both need to be treated as atomic 128-byte units
+            stick_coords = (
+                [td.device_coords[-3], td.device_coords[-1]]
+                if len(td.device_coords) >= 3
+                else td.device_coords[-2:]
+            )
             stick_vars = []
-            for coord in td.device_coords[-2:]:
+            # for coord in td.device_coords[-2:]:
+            for coord in stick_coords:
                 if len(coord.free_symbols) == 1:
                     var = next(iter(coord.free_symbols))
                     if var in adjusted_space:

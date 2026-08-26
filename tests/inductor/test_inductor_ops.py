@@ -507,8 +507,20 @@ _SCALED_BMM_SHAPES = {
     #   QK: Q[1,12,384,64] @ Kᵀ[1,12,64,384] -> scores[1,12,384,384]
     #   AV: attn[1,12,384,384] @ V[1,12,384,64] -> ctx[1,12,384,64]
     # QK's K=64 is half an FP8 stick (128 elems); AV's K=384 is 3 full sticks.
+
     "4d_bert_qk_1x12x384x64x384": ((1, 12, 384, 64), (1, 12, 64, 384)),
     "4d_bert_av_1x12x384x384x64": ((1, 12, 384, 384), (1, 12, 384, 64)),
+    "4d_bert_aligned_1x12x384x384x64": ((1, 12, 384, 384), (1, 12, 384, 64)),
+    "4d_aligned_qk_2x12x384x128x384": ((2, 12, 384, 128), (2, 12, 128, 384)),
+    "4d_aligned_qk_1x12x384x256x384": ((1, 12, 384, 256), (1, 12, 256, 384)),
+
+    ## test with all 128 
+    "4d_2x12x128x128x128": ((2, 12, 128, 128), (2, 12, 128, 128)),
+    # Same, B=1: exercises the B=1-folds-out-of-the-loop path (dim_order has
+    # no batch entry at all -- see the qfp8wt companion/stick derivation for
+    # bert_qk's K^T) on top of the all-128 clean-stick shape above.
+    "4d_1x12x128x128x128": ((1, 12, 128, 128), (1, 12, 128, 128)),
+
 }
 
 SCALED_BMM_TESTS = {

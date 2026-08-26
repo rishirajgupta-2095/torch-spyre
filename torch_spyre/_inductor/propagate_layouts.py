@@ -324,6 +324,8 @@ def _rescale_stl_for_dtype(
     out_dtype: torch.dtype,
     ea: ElementArrangement,
 ) -> SpyreTensorLayout:
+    import pdb; 
+    pdb.set_trace()
     """Propagate a device layout across a same-shape, differing-stick-depth dtype conversion.
 
     Copies the input STL's ``device_size``/``stride_map`` and rescales the stick
@@ -363,12 +365,75 @@ def _rescale_stl_for_dtype(
         get_device_dtype(out_dtype),
         ea,
     )
+# def _rescale_stl_for_dtype(
+#     stl: SpyreTensorLayout,
+#     out_dtype: torch.dtype,
+#     ea: ElementArrangement,
+# ) -> SpyreTensorLayout:
+#     """Propagate a device layout across a same-shape, differing-stick-depth dtype conversion.
+
+#     Copies the input STL's ``device_size``/``stride_map`` and rescales the stick
+#     depth (the last device dim) plus, when present, the num-sticks dim that
+#     indexes along the same host dim. This preserves any non-canonical layout
+#     or padding present in the input STL instead of reconstructing a dense layout
+#     from the logical size/stride.
+
+#     The input elements-per-stick is read from ``stl.device_size[-1]`` (the stick
+#     dimension is always full, so it equals ``get_elem_in_stick(in_dtype)``); the
+#     output count comes from ``out_dtype``.
+
+#     Args:
+#         stl: Input device layout to rescale.
+#         out_dtype: Torch dtype of the conversion output.
+#         ea: ElementArrangement to stamp on the returned layout.
+#     """
+#     breakpoint()
+#     in_eps = stl.device_size[-1]
+#     out_eps = get_elem_in_stick(out_dtype)
+#     out_device_size = list(stl.device_size)
+#     out_stride_map = list(stl.stride_map)
+#     out_device_size[-1] = out_eps
+#     # Rescale the num-sticks dim -- the non-stick device dim that indexes along
+#     # the same host dim as the stick dim -- by the stick-depth ratio.
+#     #
+#     # Locate it structurally, not by stride value. In every case of
+#     # get_generic_stick_layout() the stick dim is duplicated at dim_map[-3], so
+#     # the num-sticks dim is always at device index len(device_size) - 3 (index 0
+#     # for the rank-1 host case, whose device rank is 2). Scanning for the first
+#     # stride_map entry equal to in_eps instead picks the wrong dim whenever an
+#     # ordinary host dim happens to share that stride -- e.g. a contiguous
+#     # [1, 12, 384, 64] fp16 attention operand, where the seq dim's host stride
+#     # equals head_dim == 64 == in_eps, so the scan rescales seq 384 -> 192.
+#     #
+#     # The num-sticks stride is host_stride[stick_dim] * elems_per_stick, i.e.
+#     # stride_map[-1] * in_eps -- which is in_eps only when the stick dim is the
+#     # innermost contiguous host dim. Checking against that product also handles
+#     # transposed operands. A staggered/sparse layout (e.g. the DL16_TO_FP32
+#     # restoration operand, whose stride_map carries sentinel -1 entries rather
+#     # than a linear num-sticks stride) fails the check; there only the stick
+#     # depth changes, so a no-match is expected and left as-is.
+#     i = max(0, len(out_stride_map) - 3)
+#     stick_stride = stl.stride_map[-1]
+#     if stick_stride > 0 and stl.stride_map[i] == stick_stride * in_eps:
+#         # Ceiling division: the padded element count device_size[i] * in_eps may
+#         # be smaller than one output stick (1 * 64 // 128 == 0 for a head_dim=64
+#         # fp16 -> fp8 quantization), and a size-0 dim changes the layout rank
+#         # and corrupts downstream graph partitioning.
+#         out_device_size[i] = math.ceil(stl.device_size[i] * in_eps / out_eps)
+#         out_stride_map[i] = stick_stride * out_eps
+#     return SpyreTensorLayout(
+#         out_device_size,
+#         out_stride_map,
+#         get_device_dtype(out_dtype),
+#         ea,
+#     )
 
 
 def _qfp8wt_stl(
     output: FixedLayout,
     in_layout: FixedLayout,
 ) -> SpyreTensorLayout:
+    breakpoint()
     """Propagate special FP8 tensor with 2D stick [2, 64]
 
     The QFP8WT weight (KERNEL) tensor requires stick dimensions of [2, 64].  This
@@ -568,12 +633,14 @@ def _single_arg_op_layout(
             # fp16 (64 elems/stick) -> fp8 (128 elems/stick) quantization.
             # Propagate the input device layout and rescale for the dtype change,
             # preserving any padding present in the input STL.
+            breakpoint()
             return [
                 _rescale_stl_for_dtype(stl, output.dtype, ElementArrangement.QFP8CH)
             ]
 
         case spyreop.qfp8wt.default:
             # fp16 -> fp8 weight quantization with 2D-stick layout [2, 64].
+            breakpoint()
             return [_qfp8wt_stl(output, in_layout)]
 
     # For a bool output this op is dtype-preserving data movement or a

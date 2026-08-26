@@ -166,7 +166,8 @@ void SpyreTensorLayout::init(std::vector<int64_t> host_size,
   auto dim_map = spyre::get_generic_stick_layout(dim_order);
   this->device_size.resize(dim_map.size());
   bool sparse = dim_order.back() == -1;
-  auto elems_in_stick = sparse ? 1 : this->elems_per_stick();
+  // auto elems_in_stick = sparse ? 1 : this->elems_per_stick();
+  auto elems_in_stick = this->elems_per_stick();
   auto stick_dim = dim_map.back();
   this->device_size[dim_map.size() - 1] = this->elems_per_stick();
   for (int i = 0; i < dim_map.size() - 1; i++) {
