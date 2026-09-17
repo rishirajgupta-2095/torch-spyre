@@ -488,12 +488,13 @@ auto generate_dci(const at::Tensor* cpu_tensor, const at::Tensor* dev_tensor,
 
   if (stl.element_arrangement == ElementArrangement::QFP8WT) {
     // Specialized DCI generation for 2D stick [2, 64] (128 bytes total).
-    // cpu_shape after reverse: [N, K] where N is PyTorch inner dim (cols) and K is PyTorch outer dim (rows).
-    const int64_t eps = stl.elems_per_stick();
+    // cpu_tensor shape: [K, N] (rows = in_features, cols = out_features).
+    // After std::reverse: cpu_shape[0] is N (innermost/cols), cpu_shape[1] is K (outermost/rows).
+    const int64_t eps = stl.elems_per_stick();  // 128
     const int64_t si = 2;
-    const int64_t so = eps / si;  // 64
-    const int64_t K = cpu_shape[0];
-    const int64_t N = cpu_shape[1];
+    const int64_t so = eps / si;               // 64
+    const int64_t N = cpu_shape[0];            // columns / out_features
+    const int64_t K = cpu_shape[1];            // rows / in_features
 
     const int64_t dim2 = K / si;
     const int64_t dim3 = N / so;
@@ -504,12 +505,22 @@ auto generate_dci(const at::Tensor* cpu_tensor, const at::Tensor* dev_tensor,
 
     DataConversionStrideInfo dcsi;
     dcsi.size_ = {si, so, dim2, dim3};
-    dcsi.stride_src_ = {1, K, si, dst3};
-    dcsi.stride_dst_ = {1, si, dst2, dst3};
+    // Host stride when stepping through:
+    // dim 0 (si=2): stride is N (next row in host tensor)
+    // dim 1 (so=64): stride is 1 (next col in host tensor)
+    // dim 2 (dim2=K/2): stride is si * N = 2 * N
+    // dim 3 (dim3=N/64): stride is so * 1 = 64
+    dcsi.stride_src_ = host2device
+                           ? std::vector<int64_t>{N, 1, si * N, so}
+                           : std::vector<int64_t>{1, si, dst2, dst3};
+    dcsi.stride_dst_ = host2device
+                           ? std::vector<int64_t>{1, si, dst2, dst3}
+                           : std::vector<int64_t>{N, 1, si * N, so};
     dcsi.offset_src_ = host2device ? cpu_offset : 0;
-    dcsi.offset_dst_ = 0;
+    dcsi.offset_dst_ = host2device ? 0 : cpu_offset;
     dci.dcsi_ = {dcsi};
     dci.output_shape_ = host2device ? expanded_dev_shape : cpu_shape;
+    dci.input_shape_ = host2device ? cpu_shape : expanded_dev_shape;
 
     const int64_t cum_offset_n = dim2 * eps;
 
@@ -534,9 +545,8 @@ auto generate_dci(const at::Tensor* cpu_tensor, const at::Tensor* dev_tensor,
     dci.dcsi_ = get_device_stride_infos(t_sizes, t_dev_strides, cpu_offset, stl,
                                         host2device, t_cpu_strides);
     dci.output_shape_ = host2device ? dev_shape : cpu_shape;
+    dci.input_shape_ = host2device ? cpu_shape : dev_shape;
   }
-
-  dci.input_shape_ = host2device ? cpu_shape : dev_shape;
   if (torch_spyre::logging::legacy::is_legacy_debug_enabled()) {
     std::stringstream s;
     dci.exportJson(s);
