@@ -26,6 +26,7 @@ from torch.testing._internal.common_utils import (
 from torch_spyre.model_utils import (
     _dma_to_spyre_dim_order_swapped,
     _dma_to_spyre_indirect_access,
+    _dma_to_spyre_qfp8wt,
     dma_moe_expert_weight_to_spyre,
     dma_moe_per_expert_scale_to_spyre,
     load_model_to_spyre,
@@ -63,6 +64,29 @@ class TestLoadModelToSpyre(TestCase):
         """The dim_order helper only accepts 2D weights."""
         with self.assertRaises(AssertionError):
             _dma_to_spyre_dim_order_swapped(torch.randn(4, dtype=torch.float16))
+
+    # ── FP8 QFP8WT direct DMA layout ──────────────────────────────
+
+    def test_qfp8wt_weight_layout_and_roundtrip(self):
+        """A 2D FP8 weight transferred with _dma_to_spyre_qfp8wt receives
+        ElementArrangement.QFP8WT and round-trips correctly."""
+        from torch_spyre._C import ElementArrangement, get_spyre_tensor_layout
+
+        w = torch.randn(128, 64, dtype=torch.float32).to(torch.float8_e4m3fn)
+        dev = _dma_to_spyre_qfp8wt(w)
+        layout = get_spyre_tensor_layout(dev)
+        self.assertEqual(layout.element_arrangement, ElementArrangement.QFP8WT)
+        self.assertEqual(dev.dtype, torch.float8_e4m3fn)
+        self.assertEqual(dev.shape, w.shape)
+        # Verify bit-exact round trip
+        self.assertTrue(torch.equal(dev.cpu(), w))
+
+    def test_qfp8wt_rejects_non_2d_or_non_fp8(self):
+        """QFP8WT helper validates dimensionality and dtype."""
+        with self.assertRaises(AssertionError):
+            _dma_to_spyre_qfp8wt(torch.randn(128, dtype=torch.float8_e4m3fn))
+        with self.assertRaises(AssertionError):
+            _dma_to_spyre_qfp8wt(torch.randn(128, 64, dtype=torch.float16))
 
     # ── embedding gather-optimal (indirect-access) layout ──────────
 

@@ -64,6 +64,7 @@ import torch.nn as nn
 
 from torch_spyre._C import (
     DataFormats,
+    ElementArrangement,
     SpyreTensorLayout,
     copy_tensor,
     get_device_dtype,
@@ -142,6 +143,41 @@ def _dma_to_spyre_dim_order_swapped(
         [1, 0],  # dim_order: stick on dim-0 = out_features
     )
     dst = spyre_empty_with_layout(weight.size(), weight.stride(), dev_dtype, layout)
+    copy_tensor(weight, dst, non_blocking=False)
+    return dst
+
+
+def _dma_to_spyre_qfp8wt(
+    weight: torch.Tensor,
+) -> torch.Tensor:
+    """Transfer a 2D FP8 weight to Spyre with the QFP8WT layout.
+
+    The weight tensor should have shape ``(in_features, out_features)`` in FP8
+    (torch.float8_e4m3fn). If given as standard PyTorch ``(out_features, in_features)``,
+    it should be transposed on CPU prior to or when calling this function.
+
+    The device tensor layout carries ``ElementArrangement.QFP8WT`` which tells
+    the DMA engine to use the 2D-stick [2, 64] physical arrangement required by
+    FP8 matmul (scaled_mm).
+    """
+    assert weight.ndim == 2, "QFP8WT DMA path is for 2D weights only"
+    assert (
+        weight.dtype == torch.float8_e4m3fn
+    ), f"QFP8WT DMA path requires float8_e4m3fn, got {weight.dtype}"
+
+    if not weight.is_contiguous():
+        weight = weight.contiguous()
+
+    layout = SpyreTensorLayout(
+        list(weight.shape),
+        list(weight.stride()),
+        torch.float8_e4m3fn,
+        [0, 1],
+        ElementArrangement.QFP8WT,
+    )
+    dst = spyre_empty_with_layout(
+        weight.size(), weight.stride(), torch.float8_e4m3fn, layout
+    )
     copy_tensor(weight, dst, non_blocking=False)
     return dst
 
@@ -313,14 +349,27 @@ def _transfer_module(
         # (bias, norms, ...) -> default layout.
         dev = None
         if is_linear and name == "weight" and p.ndim == 2:
-            logger.debug(
-                "  %s.%s: shape=%s -> Spyre dim_order=[1, 0]",
-                prefix,
-                name,
-                list(p.shape),
-            )
-            dev = _dma_to_spyre_dim_order_swapped(p, target_dtype=dtype)
-            counts["linear"] += 1
+            if p.dtype == torch.float8_e4m3fn:
+                logger.debug(
+                    "  %s.%s: shape=%s -> Spyre QFP8WT layout (float8_e4m3fn)",
+                    prefix,
+                    name,
+                    list(p.shape),
+                )
+                # Standard PyTorch linear stores [out_features, in_features];
+                # QFP8WT requires [in_features, out_features].
+                w_t = p.t().contiguous()
+                dev = _dma_to_spyre_qfp8wt(w_t)
+                counts["linear_fp8"] = counts.get("linear_fp8", 0) + 1
+            else:
+                logger.debug(
+                    "  %s.%s: shape=%s -> Spyre dim_order=[1, 0]",
+                    prefix,
+                    name,
+                    list(p.shape),
+                )
+                dev = _dma_to_spyre_dim_order_swapped(p, target_dtype=dtype)
+                counts["linear"] += 1
         elif is_embedding and name == "weight" and p.ndim == 2:
             dev = _dma_to_spyre_indirect_access(p, target_dtype=dtype)
             # dev is None if the hidden dim doesn't tile into sticks; the helper
@@ -347,8 +396,19 @@ def _transfer_module(
     for name, buf in list(module._buffers.items()):
         if buf is None or buf.device.type == DEVICE_NAME:
             continue
-        module._buffers[name] = _dma_to_spyre_default(buf, target_dtype=dtype)
-        counts["buffer"] += 1
+        # Check if buffer is an FP8Linear weight buffer (already [in_features, out_features])
+        if name == "weight" and buf.ndim == 2 and buf.dtype == torch.float8_e4m3fn:
+            logger.debug(
+                "  %s.%s (buffer): shape=%s -> Spyre QFP8WT layout",
+                prefix,
+                name,
+                list(buf.shape),
+            )
+            module._buffers[name] = _dma_to_spyre_qfp8wt(buf)
+            counts["buffer_fp8"] = counts.get("buffer_fp8", 0) + 1
+        else:
+            module._buffers[name] = _dma_to_spyre_default(buf, target_dtype=dtype)
+            counts["buffer"] += 1
 
 
 def load_model_to_spyre(
@@ -378,16 +438,26 @@ def load_model_to_spyre(
     # Ensure Spyre runtime is initialized before using _C functions
     _ensure_spyre_runtime()
 
-    counts = {"linear": 0, "embedding": 0, "other": 0, "buffer": 0}
+    counts = {
+        "linear": 0,
+        "linear_fp8": 0,
+        "embedding": 0,
+        "other": 0,
+        "buffer": 0,
+        "buffer_fp8": 0,
+    }
     _transfer_module(model, dtype, counts)
     logger.info(
         "load_model_to_spyre: %d Linear weights optimized (dim_order=[1,0]), "
+        "%d FP8 Linear weights optimized (QFP8WT layout), "
         "%d Embedding tables optimized (indirect-access layout), %d other "
-        "params and %d buffers transferred with default layout",
+        "params and %d buffers (%d FP8) transferred with default layout",
         counts["linear"],
+        counts["linear_fp8"],
         counts["embedding"],
         counts["other"],
         counts["buffer"],
+        counts["buffer_fp8"],
     )
     return model
 
