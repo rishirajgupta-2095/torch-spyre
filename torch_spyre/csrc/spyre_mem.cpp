@@ -486,61 +486,45 @@ auto generate_dci(const at::Tensor* cpu_tensor, const at::Tensor* dev_tensor,
   std::reverse(cpu_shape.begin(), cpu_shape.end());
   std::reverse(dev_shape.begin(), dev_shape.end());
 
+  // FP8 multi-dim stick layout uses specialized DCI generation
   if (stl.element_arrangement == ElementArrangement::QFP8WT) {
-    // Specialized DCI generation for 2D stick [2, 64] (128 bytes total).
-    // cpu_tensor shape: [K, N] (rows = in_features, cols = out_features).
-    // After std::reverse: cpu_shape[0] is N (innermost/cols), cpu_shape[1] is K (outermost/rows).
     const int64_t eps = stl.elems_per_stick();  // 128
-    const int64_t si = 2;
-    const int64_t so = eps / si;               // 64
-    const int64_t N = cpu_shape[0];            // columns / out_features
-    const int64_t K = cpu_shape[1];            // rows / in_features
+    const int64_t si = 2;                       // K-dim stick size
+    const int64_t so = eps / si;                // 64, N-dim stick size
+    // Note: cpu_shape has been reversed above: cpu_shape[0] is N (innermost), cpu_shape[1] is K (outermost).
+    const int64_t N = cpu_shape[0];
+    const int64_t K = cpu_shape[1];
 
-    const int64_t dim2 = K / si;
-    const int64_t dim3 = N / so;
+    const int64_t n_blocks = N / so;
+    const int64_t k_blocks = K / si;
 
-    const std::vector<int64_t> expanded_dev_shape = {si, so, dim2, dim3};
-    const int64_t dst2 = si * so;     // = eps = 128
-    const int64_t dst3 = dim2 * eps;  // = dim2 * si * so
+    const std::vector<int64_t> dev_2d_stick_shape = {so, si, n_blocks, k_blocks};
 
     DataConversionStrideInfo dcsi;
-    dcsi.size_ = {si, so, dim2, dim3};
-    // Host stride when stepping through:
-    // dim 0 (si=2): stride is N (next row in host tensor)
-    // dim 1 (so=64): stride is 1 (next col in host tensor)
-    // dim 2 (dim2=K/2): stride is si * N = 2 * N
-    // dim 3 (dim3=N/64): stride is so * 1 = 64
-    dcsi.stride_src_ = host2device
-                           ? std::vector<int64_t>{N, 1, si * N, so}
-                           : std::vector<int64_t>{1, si, dst2, dst3};
-    dcsi.stride_dst_ = host2device
-                           ? std::vector<int64_t>{1, si, dst2, dst3}
-                           : std::vector<int64_t>{N, 1, si * N, so};
-    dcsi.offset_src_ = host2device ? cpu_offset : 0;
-    dcsi.offset_dst_ = host2device ? 0 : cpu_offset;
+    dcsi.size_ = {so, si, n_blocks, k_blocks};
+    // Host contiguous layout for [K, N]: stride along N is 1, stride along K is N.
+    // In-stick loops:
+    //   dim 0: n_in in [0, 64) -> host stride 1, dev stride 1
+    //   dim 1: k_in in [0, 2)  -> host stride N, dev stride 64
+    // Across-stick loops:
+    //   dim 2: n_block in [0, N/64) -> host stride 64, dev stride 128
+    //   dim 3: k_block in [0, K/2)  -> host stride 2*N, dev stride n_blocks * 128 (= 2*N)
+    if (host2device) {
+      dcsi.stride_src_ = {1, N, so, 2 * N};
+      dcsi.stride_dst_ = {1, so, eps, n_blocks * eps};
+      dcsi.offset_src_ = cpu_offset;
+      dcsi.offset_dst_ = 0;
+      dci.output_shape_ = dev_2d_stick_shape;
+      dci.input_shape_ = cpu_shape;
+    } else {
+      dcsi.stride_src_ = {1, so, eps, n_blocks * eps};
+      dcsi.stride_dst_ = {1, N, so, 2 * N};
+      dcsi.offset_src_ = 0;
+      dcsi.offset_dst_ = cpu_offset;
+      dci.output_shape_ = cpu_shape;
+      dci.input_shape_ = dev_2d_stick_shape;
+    }
     dci.dcsi_ = {dcsi};
-    dci.output_shape_ = host2device ? expanded_dev_shape : cpu_shape;
-    dci.input_shape_ = host2device ? cpu_shape : expanded_dev_shape;
-
-    const int64_t cum_offset_n = dim2 * eps;
-
-    // K dimension (outermost host dim):
-    perdim_element_arrangement ea_K;
-    ea_K.dimShape_ = K;
-    ea_K.subElems_ = {K};
-    ea_K.subStride_ = {1};
-    ea_K.cumElemsBefore_ = {1, si};
-    ea_K.cumOffset_ = {1, dst2};
-
-    // N dimension (innermost host dim):
-    perdim_element_arrangement ea_N;
-    ea_N.dimShape_ = N;
-    ea_N.subElems_ = {so, si, N / eps};
-    ea_N.subStride_ = {si, 1, dst2};
-    ea_N.cumElemsBefore_ = {1, so};
-    ea_N.cumOffset_ = {si, cum_offset_n};
-
-    dci.output_dimwise_ea_ = {ea_K, ea_N};
   } else {
     dci.dcsi_ = get_device_stride_infos(t_sizes, t_dev_strides, cpu_offset, stl,
                                         host2device, t_cpu_strides);

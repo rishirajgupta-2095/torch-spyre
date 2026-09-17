@@ -172,7 +172,7 @@ def _dma_to_spyre_qfp8wt(
         list(weight.shape),
         list(weight.stride()),
         torch.float8_e4m3fn,
-        [0, 1],
+        list(range(len(weight.shape))),
         ElementArrangement.QFP8WT,
     )
     dst = spyre_empty_with_layout(

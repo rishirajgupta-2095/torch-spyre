@@ -84,7 +84,7 @@ class TestLoadModelToSpyre(TestCase):
     def test_qfp8wt_rejects_non_2d_or_non_fp8(self):
         """QFP8WT helper validates dimensionality and dtype."""
         with self.assertRaises(AssertionError):
-            _dma_to_spyre_qfp8wt(torch.randn(128, dtype=torch.float8_e4m3fn))
+            _dma_to_spyre_qfp8wt(torch.randn(128, dtype=torch.float32).to(torch.float8_e4m3fn))
         with self.assertRaises(AssertionError):
             _dma_to_spyre_qfp8wt(torch.randn(128, 64, dtype=torch.float16))
 
