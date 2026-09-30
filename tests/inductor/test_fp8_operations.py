@@ -343,6 +343,45 @@ class TestFP8Operations:
         )
         assert result.shape == (M, N), f"Expected shape ({M}, {N}), got {result.shape}"
 
+    def test_fp8_scaled_mm_out_dtype_fp8(self):
+        """Test _scaled_mm returning FP8 (torch.float8_e4m3fn) based on out_dtype."""
+        M, K, N = 128, 128, 128
+        mat_a = cached_randn((M, K), dtype=torch.float16, scale=1.0)
+        mat_b = cached_randn((K, N), dtype=torch.float16, scale=1.0)
+        scale_a = (torch.max(torch.abs(mat_a)) / 448.0).reshape(1)
+        scale_b = (torch.max(torch.abs(mat_b)) / 448.0).reshape(1)
+
+        mat_a_d = mat_a.to(DEVICE)
+        mat_b_d = mat_b.to(DEVICE)
+        scale_a_d = scale_a.to(DEVICE)
+        scale_b_d = scale_b.to(DEVICE)
+
+        quantize_a = torch.compile(
+            lambda x, s: torch.ops.spyre.quantize_fp8_with_scale(x, s)
+        )
+        quantize_b = torch.compile(
+            lambda x, s: torch.ops.spyre.quantize_weight_fp8_with_scale(x, s)
+        )
+        q_a = quantize_a(mat_a_d, scale_a_d)
+        q_b = quantize_b(mat_b_d, scale_b_d)
+
+        scaled_mm = torch.compile(
+            lambda a, b, sa, sb: torch.ops.aten._scaled_mm(
+                a,
+                b,
+                scale_a=sa,
+                scale_b=sb,
+                bias=None,
+                out_dtype=torch.float8_e4m3fn,
+            )
+        )
+        result = scaled_mm(q_a, q_b, scale_a_d, scale_b_d)
+
+        assert result.dtype == torch.float8_e4m3fn, (
+            f"Expected torch.float8_e4m3fn, got {result.dtype}"
+        )
+        assert result.shape == (M, N), f"Expected shape ({M}, {N}), got {result.shape}"
+
     def test_quantize_weight_fp8_with_scale_eager_mode_dtype_only(self):
         """Regression guard: quantize_weight_fp8_with_scale returns a valid FP8 tensor in eager mode.
 

@@ -3283,6 +3283,9 @@ def scaled_mm_decomp(
     if use_fast_accum:
         logger.warning("use_fast_accum parameter in _scaled_mm is not yet supported")
 
+    if out_dtype is not None and result.dtype != out_dtype:
+        result = result.to(out_dtype)
+
     return result
 
 
