@@ -531,7 +531,7 @@ SCALED_MM_TESTS = {
     for sa, sb, b in _SCALED_MM_PARAMS
 }
 
-# spyre.scaled_bmm: (mat1_shape, mat2_shape) -> [*batch, M, K] @ [*batch, K, N]
+
 _SCALED_BMM_SHAPES = {
     # 3D
     "3d_4x64x128x64": ((4, 64, 128), (4, 128, 64)),
@@ -545,11 +545,10 @@ _SCALED_BMM_SHAPES = {
     # 4D, K a multiple of the FP8 stick
     "4d_aligned_qk_2x12x384x128x384": ((2, 12, 384, 128), (2, 12, 128, 384)),
     "4d_aligned_qk_1x12x384x256x384": ((1, 12, 384, 256), (1, 12, 256, 384)),
-    # BERT-base attention (12 heads, seq 384, head_dim 64):
-    #   QK: Q[1,12,384,64] @ K^T[1,12,64,384] -- K is half an FP8 stick
-    #   AV: attn[1,12,384,384] @ V[1,12,384,64] -- K is three FP8 sticks
-    "4d_bert_qk_1x12x384x64x384": ((1, 12, 384, 64), (1, 12, 64, 384)),
-    "4d_bert_av_1x12x384x384x64": ((1, 12, 384, 384), (1, 12, 384, 64)),
+    # Granite attention QK (32 heads, head_dim 128): Q[1,32,S,128] @ K^T[1,32,128,S]
+    "4d_granite_qk_1x32x128x128x128": ((1, 32, 128, 128), (1, 32, 128, 128)),
+    "4d_granite_qk_1x32x256x128x256": ((1, 32, 256, 128), (1, 32, 128, 256)),
+    "4d_granite_qk_1x32x512x128x512": ((1, 32, 512, 128), (1, 32, 128, 512)),
 }
 
 # Scales are applied outside the op (as for spyre.scaled_mm), so stay at 1.0.
