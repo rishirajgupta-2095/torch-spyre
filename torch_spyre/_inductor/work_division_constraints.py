@@ -884,35 +884,6 @@ def qfp8wt_split_domains(ctx: WorkDivConstraintContext) -> ConstraintResult:
     return ConstraintResult(allowed_splits=allowed_splits)
 
 
-# def qfp8wt_split_domains(ctx: WorkDivConstraintContext) -> ConstraintResult:
-#     """Restrict QFP8WT tensors' second stick dimension to split=1.
-
-#     QFP8WT uses a 2D stick layout (2x64 elements, 128 bytes); both stick dims
-#     must stay atomic 128-byte units, so any iteration var indexing the second
-#     stick coordinate of the matmul kernel tensor (second input) or the output
-#     has the singleton legal domain ``{1}``.
-#     """
-#     all_tds = ctx.input_tds + [ctx.output_td]
-#     if not has_qfp8wt_tensor(all_tds):
-#         return ConstraintResult()
-
-#     allowed_splits: dict[Symbol, frozenset[int]] = {}
-
-#     if len(ctx.input_tds) > 1:
-#         kernel_td = ctx.input_tds[1]
-#         if len(kernel_td.device_coords) > 1 and has_qfp8wt_tensor([kernel_td]):
-#             for var in kernel_td.device_coords[-2].free_symbols:
-#                 if isinstance(var, Symbol):
-#                     allowed_splits[var] = frozenset({1})
-
-#     if len(ctx.output_td.device_coords) > 1 and has_qfp8wt_tensor([ctx.output_td]):
-#         for var in ctx.output_td.device_coords[-2].free_symbols:
-#             if isinstance(var, Symbol):
-#                 allowed_splits[var] = frozenset({1})
-
-#     return ConstraintResult(allowed_splits=allowed_splits)
-
-
 def qfp8wt_matmul_k_split_domains(ctx: WorkDivConstraintContext) -> ConstraintResult:
     """Restrict reduction K to split=1 for QFP8WT / staggered-EA batchmatmul.
 
