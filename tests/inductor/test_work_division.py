@@ -1879,6 +1879,7 @@ class TestQfp8wtConstraints(unittest.TestCase):
         self.assertTrue(restricted_vars)
         for v in restricted_vars:
             self.assertEqual(result.allowed_splits[v], frozenset({1}))
+
     def test_batch_dims_and_k_restricted_for_batched_qfp8wt_output(self):
         b, h, k, n = _isym("b"), _isym("h"), _isym("k"), _isym("n")
         op = _computed_buffer((2, 12, 128, 128), name="qfp8_out_4d")
@@ -1893,10 +1894,10 @@ class TestQfp8wtConstraints(unittest.TestCase):
         # K and both batch dims are pinned; N, the stick dim, stays splittable.
         self.assertEqual(
             # result.allowed_splits, {v: frozenset({1}) for v in (b, h, k)}
-            result.allowed_splits, {v: frozenset({1}) for v in (b, h, k, n)}
-
+            result.allowed_splits,
+            {v: frozenset({1}) for v in (b, h, k, n)},
         )
-    
+
     def test_standard_output_yields_no_pins(self):
         b, m, n = _isym("b"), _isym("m"), _isym("n")
         op = _computed_buffer((4, 8, 128), name="std_out")

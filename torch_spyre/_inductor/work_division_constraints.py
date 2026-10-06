@@ -830,6 +830,7 @@ def has_staggered_ea_tensor(tds: "list[TensorDep]") -> bool:
     """True if any tensor carries a staggered EA (``FP32_TO_DL16`` / ``DL16_TO_FP32``)."""
     return _has_ea_tensor(tds, STAGGERED_EAS)
 
+
 def _qfp8wt_unsplittable_coords(td: "TensorDep") -> list[Expr]:
     """Coordinates of a QFP8WT tensor whose iteration vars must stay unsplit.
 
@@ -881,6 +882,7 @@ def qfp8wt_split_domains(ctx: WorkDivConstraintContext) -> ConstraintResult:
                     allowed_splits[var] = frozenset({1})
 
     return ConstraintResult(allowed_splits=allowed_splits)
+
 
 # def qfp8wt_split_domains(ctx: WorkDivConstraintContext) -> ConstraintResult:
 #     """Restrict QFP8WT tensors' second stick dimension to split=1.
