@@ -388,9 +388,12 @@ auto get_device_stride_infos(c10::IntArrayRef sizes, c10::IntArrayRef strides,
  * space follows the SpyreTensorLayout's device_size order, with K counted in
  * pairs and N in 64-wide blocks:
  *   rank 2:   [N/so, K/si, stick]
- *   rank >=3: [L1, .., L(m-1), K/si, N/so, L0, stick]
+ *   rank >=3: [L1, .., L(m-1), K/si, N/so, L0, stick]   (N > eps)
+ *             [N/so, L1, .., L(m-1), K/si, L0, stick]   (N <= eps)
  * because the identity-order generic stick layout has device_size
- * [d1, .., d(r-2), ceil(N/eps), d0, eps].
+ * [d1, .., d(r-2), ceil(N/eps), d0, eps], and when N fits in one tile its
+ * extent-1 tile axis is hoisted to the front by codegen. This is the order
+ * batchmatmulfp8 reads (checked against scaled_bmm on hardware).
  *
  * Host strides are row-major over `sizes`; the CPU tensor's actual strides
  * are ignored. Callers (load_model_to_spyre) pass transposed views and rely
@@ -443,10 +446,16 @@ static DataConversionStrideInfo get_qfp8wt_stride_info(
   if (rank == 2) {
     axes.insert(axes.end(), {k_hi, n_hi});
   } else {
-    axes.insert(axes.end(), {{sizes[0], strides[0], sizes[0]}, n_hi, k_hi});
+    axes.push_back({sizes[0], strides[0], sizes[0]});
+    if (n_tiles > 1) axes.push_back(n_hi);
+    axes.push_back(k_hi);
     for (int64_t i = rank - 3; i >= 1; --i) {
       axes.push_back({sizes[i], strides[i], sizes[i]});
     }
+    // A one-tile N axis has extent 1, and codegen hoists extent-1 dims to
+    // the front of the device order, so batchmatmulfp8 reads the N/so
+    // blocks outermost.
+    if (n_tiles == 1) axes.push_back(n_hi);
   }
 
   DataConversionStrideInfo dcsi;
