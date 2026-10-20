@@ -1605,14 +1605,29 @@ def _create_sdsc_tensors(
             layout_stick_size = [2, dtype_stick_size // 2]
             # The 2D stick packs 2 values of the weight's K dim against 64 of
             # its N (stick) dim, so stickDimOrder_ is [K, N] with the real
-            # stick dim last. K comes from the host layout (arg.qfp8wt_k_dim),
-            # since neither dim_order nor the iteration space identifies it:
-            # a batch dim can sit where K would be, and a view can reorder the
-            # iteration space.
+            # stick dim last. Slicing dim_order[-2:] only yields that for a
+            # rank-2 weight; once the weight has batch dims they land in
+            # dim_order too (e.g. [in, x, out], or [mb, out, y, x] for qfp8wt)
+            # and the slice names a batch dim instead of K or N.
             companion = None
-            if arg.qfp8wt_k_dim is not None:
-                companion = symbol_mapping.get(arg.qfp8wt_k_dim, arg.qfp8wt_k_dim)
-            if companion is not None and companion in dim_order:
+            if op_spec.op == "batchmatmulfp8":
+                # K is the matmul's reduction dim, identified by its role
+                # (in the weight, not in the output) rather than by position.
+                k_sym = _matmul_reduction_symbol(op_spec, symbol_mapping)
+                if k_sym in dim_order and k_sym != real_stick:
+                    companion = k_sym
+            else:
+                # qfp8wt is pointwise, so no op role identifies K; take the two
+                # innermost iteration dims ([..., K, N]). TODO: identify K
+                # without relying on iteration order once the 2D stick is in
+                # device coordinates.
+                kn_labels = {
+                    symbol_mapping.get(s, s) for s in list(op_spec.iteration_space)[-2:]
+                }
+                kn_pair = [d for d in dim_order if d in kn_labels]
+                if len(kn_pair) == 2 and real_stick in kn_pair:
+                    companion = next(d for d in kn_pair if d != real_stick)
+            if companion is not None:
                 effective_stick = [companion, real_stick]
             else:
                 # K not identifiable (e.g. a rank-1 weight): keep the
@@ -1773,6 +1788,22 @@ def _round_up_to_stick(
         sdsc_iteration_space[sym] = padded
 
 
+def _matmul_reduction_symbol(op_spec: OpSpec, symbol_mapping: dict) -> Symbol | None:
+    """Return the K (reduction) symbol of a matmul, or None if not identifiable.
+
+    K is the symbol in y's (non-stick) device_coordinates that is NOT in the
+    output's device_coordinates: it is reduced away. This follows from the
+    role of K in the op, so it does not depend on where K sits in y's layout
+    or in the iteration space.
+    """
+    # y is always args[1]; output is always args[-1] for matmul.
+    y_dim_order, y_stick_dim = _get_device_dim_order(op_spec.args[1], symbol_mapping)
+    y_non_stick_syms = set(y_dim_order) - {y_stick_dim}
+    out_dim_order, _ = _get_device_dim_order(op_spec.args[-1], symbol_mapping)
+    k_candidates = y_non_stick_syms - set(out_dim_order)
+    return min(k_candidates, key=str) if k_candidates else None
+
+
 def _extend_matmul_k_to_padded(
     op_spec: OpSpec,
     sdsc_iteration_space: dict,
@@ -1795,30 +1826,13 @@ def _extend_matmul_k_to_padded(
     layout-position agnostic: it works regardless of how MATMUL_DIM_LABELS maps the
     iteration symbols for this particular ndim.
     """
-    # y is always args[1]; output is always args[-1] for matmul.
     y_arg = op_spec.args[1]
-    out_arg = op_spec.args[-1]
-
-    # Collect non-stick symbols in y's device_coordinates (after symbol_mapping).
-    y_dim_order, y_stick_dim = _get_device_dim_order(y_arg, symbol_mapping)
-    # y_stick_dim is the within-stick symbol; the remaining dims include K.
-    y_non_stick_syms: set = set(y_dim_order) - ({y_stick_dim} if y_stick_dim else set())
-
-    # Collect all symbols in the output's device_coordinates.
-    out_dim_order, _ = _get_device_dim_order(out_arg, symbol_mapping)
-    out_syms: set = set(out_dim_order)
-
-    # K is in y but not in the output (it's reduced).
-    k_candidates = y_non_stick_syms - out_syms
-    if not k_candidates:
+    k_sym = _matmul_reduction_symbol(op_spec, symbol_mapping)
+    if k_sym is None:
         logger.warning(
-            "_extend_matmul_k_to_padded: could not identify K symbol "
-            "(y_non_stick=%s, out_syms=%s), skipping",
-            y_non_stick_syms,
-            out_syms,
+            "_extend_matmul_k_to_padded: could not identify K symbol, skipping"
         )
         return
-    k_sym = min(k_candidates, key=str)
 
     if k_sym not in sdsc_iteration_space:
         logger.warning(

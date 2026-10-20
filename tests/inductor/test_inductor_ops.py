@@ -11115,11 +11115,18 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         )
 
     def test_fp8_scaled_bmm_cpu(self, a, b, scale_a, scale_b):
-        """Test spyre.scaled_bmm (FP8 batched matmul) with 3D and 4D inputs."""
+        """Test spyre.scaled_bmm (FP8 batched matmul) with 3D and 4D inputs.
 
-        def spyre_fn(a, b, scale_a, scale_b):
+        The weight is quantized on the CPU and loaded pre-quantized into the
+        QFP8WT layout with _dma_to_spyre_fp8_kernel, instead of through the
+        runtime qfp8wt op, which does not yet identify K reliably for rank >= 3.
+        """
+        from torch_spyre.model_utils import _dma_to_spyre_fp8_kernel
+
+        q_b = (b / scale_b).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+
+        def spyre_fn(a, q_b, scale_a, scale_b):
             q_a = torch.ops.spyre.quantize_fp8_with_scale(a, scale_a)
-            q_b = torch.ops.spyre.quantize_weight_fp8_with_scale(b, scale_b)
             return torch.ops.spyre.scaled_bmm(
                 q_a,
                 q_b,
@@ -11128,23 +11135,28 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 out_dtype=torch.float16,
             )
 
-        def pytorch_fn(a, b, scale_a, scale_b):
+        def pytorch_fn(a, q_b, scale_a, scale_b):
             q_a = (
                 (a / scale_a)
                 .clamp(-448.0, 448.0)
                 .to(torch.float8_e4m3fn)
                 .to(torch.float16)
             )
-            q_b = (
-                (b / scale_b)
-                .clamp(-448.0, 448.0)
-                .to(torch.float8_e4m3fn)
-                .to(torch.float16)
-            )
-            return (q_a @ q_b) * (scale_a * scale_b)
+            return (q_a @ q_b.to(torch.float16)) * (scale_a * scale_b)
 
+        target = _compile_and_run(
+            spyre_fn, (a, _dma_to_spyre_fp8_kernel(q_b), scale_a, scale_b), "spyre"
+        )
         compare_with_pytorch(
-            spyre_fn, pytorch_fn, a, b, scale_a, scale_b, atol=0.1, rtol=0.1
+            spyre_fn,
+            pytorch_fn,
+            a,
+            q_b,
+            scale_a,
+            scale_b,
+            atol=0.1,
+            rtol=0.1,
+            target=target,
         )
 
     def test_fp8_scaled_mm_granite_fp8_shapes_cpu(self, m, k, n):
