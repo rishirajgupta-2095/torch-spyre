@@ -467,6 +467,20 @@ def _qfp8ch_stl(stl: SpyreTensorLayout, out_dtype: torch.dtype) -> SpyreTensorLa
     )
 
 
+def qfp8wt_dim_order(rank: int) -> list[int]:
+    """Host dim order for a QFP8WT tensor [..., K, N]: [K, L0, .., N].
+
+    The 2D stick pairs K with N, but the device layout records only a 1D stick
+    of N. Putting K first in dim_order places it directly outside the stick,
+    so the device order is [L0, .., N-tile, K, stick] and K is device
+    coordinate -2 for every rank: codegen and work division read K from that
+    fixed position instead of inferring it. Rank 2 stays [0, 1].
+    """
+    if rank < 2:
+        return list(range(rank))
+    return [rank - 2, *range(rank - 2), rank - 1]
+
+
 def _qfp8wt_stl(
     output: FixedLayout,
     in_layout: FixedLayout,
@@ -479,7 +493,8 @@ def _qfp8wt_stl(
     Outer dimensions and strides are preserved from output layout, with the innermost
     stride always set to 1. For unaligned inputs where input stick size is not a
     multiple of input stick size, the last dimension is padded to the stick size.  For
-    aligned inputs, it retains the concrete output size.
+    aligned inputs, it retains the concrete output size. The device order puts K
+    directly outside the stick (see ``qfp8wt_dim_order``).
 
     Args:
         output: Inductor ``FixedLayout`` for the op's output tensor.
@@ -497,7 +512,7 @@ def _qfp8wt_stl(
         c_size,
         c_stride,
         output.dtype,
-        list(range(len(c_size))),
+        qfp8wt_dim_order(len(c_size)),
         ElementArrangement.QFP8WT,
     )
 

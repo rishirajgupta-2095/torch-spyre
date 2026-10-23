@@ -62,7 +62,6 @@ from .pass_utils import (
     device_coordinates,
     finite_upper_or_none,
     get_mem_deps_from_rw,
-    host_coordinates,
     input_layout_for_operation,
     invert_per_core_view,
     iteration_space_from_op,
@@ -387,14 +386,11 @@ def multi_dim_iteration_space_split(
 def _qfp8wt_stick_coords(td: TensorDep) -> list[Expr]:
     """Coordinates spanned by a QFP8WT tensor's 2D stick: its K and N dims.
 
-    For a rank-2 weight [K, N] these are the last two device coordinates. Once
-    the weight has batch dims ([..., K, N]) the generic stick layout puts the
-    outermost host dim at device position -2, so that slice names a batch dim
-    instead of K; read K and N off the host coordinates there.
+    The QFP8WT layout places K directly outside the stick (see
+    ``propagate_layouts.qfp8wt_dim_order``), so these are the last two device
+    coordinates for every rank.
     """
-    if len(td.layout.size) <= 2:
-        return td.device_coords[-2:]
-    return host_coordinates(td.layout, td.dep, None)[-2:]
+    return td.device_coords[-2:]
 
 
 def adjust_it_space_for_sticks(
