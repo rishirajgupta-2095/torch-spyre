@@ -11239,8 +11239,10 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
     def test_fp8_scaled_bmm_rejects_reduction_over_stick(self):
         """quantize, then transpose: the matmul's K is the QFP8WT stick dim.
 
-        No non-stick reorder can pair K with N in the 2D stick, so this is
-        rejected instead of computing with the wrong pairing.
+        The matmul needs N on the weight's stick, and a QFP8WT tensor cannot be
+        restickified, so layout propagation rejects it instead of computing with
+        the wrong pairing. (nonstick_dim_order's own stick check is a second
+        guard; test_qfp8wt_k_constraint.py covers its message.)
         TODO: supporting it needs a restickify of the QFP8WT tensor.
         """
         q, k, scale_a, scale_b = SCALED_BMM_QK_TESTS["qk_1x32x128x128"]
@@ -11256,7 +11258,9 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 out_dtype=torch.float16,
             )
 
-        with pytest.raises(Exception, match="reduces over its stick dim"):
+        with pytest.raises(
+            Exception, match="batchmatmulfp8: cannot restickify any input layout of y"
+        ):
             _compile_and_run(spyre_fn, [q, k, scale_a, scale_b], "spyre")
 
     @staticmethod
