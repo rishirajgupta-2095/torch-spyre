@@ -386,9 +386,9 @@ def multi_dim_iteration_space_split(
 def _qfp8wt_stick_coords(td: TensorDep) -> list[Expr]:
     """Coordinates spanned by a QFP8WT tensor's 2D stick: its K and N dims.
 
-    The QFP8WT layout places K directly outside the stick (see
-    ``propagate_layouts.qfp8wt_dim_order``), so these are the last two device
-    coordinates for every rank.
+    K sits directly outside the stick (placed by nonstick_dim_order for a
+    matmul weight, by ``propagate_layouts.qfp8wt_dim_order`` otherwise), so
+    these are the last two device coordinates for every rank.
     """
     return td.device_coords[-2:]
 

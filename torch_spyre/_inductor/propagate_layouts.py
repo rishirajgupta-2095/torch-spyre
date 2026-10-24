@@ -468,13 +468,15 @@ def _qfp8ch_stl(stl: SpyreTensorLayout, out_dtype: torch.dtype) -> SpyreTensorLa
 
 
 def qfp8wt_dim_order(rank: int) -> list[int]:
-    """Host dim order for a QFP8WT tensor [..., K, N]: [K, L0, .., N].
+    """Default host dim order for a QFP8WT tensor [..., K, N]: [K, L0, .., N].
 
     The 2D stick pairs K with N, but the device layout records only a 1D stick
-    of N. Putting K first in dim_order places it directly outside the stick,
-    so the device order is [L0, .., N-tile, K, stick] and K is device
-    coordinate -2 for every rank: codegen and work division read K from that
-    fixed position instead of inferring it. Rank 2 stays [0, 1].
+    of N, so readers (codegen, work division) take K from device coordinate -2.
+    This default places host dim -2 there, giving the device order
+    [L0, .., N-tile, K, stick]; it assumes the tensor is [..., K, N]. When a
+    matmul reads the tensor, nonstick_dim_order takes K from the matmul's
+    reduction variable instead and reorders this layout if they disagree.
+    Rank 2 stays [0, 1].
     """
     if rank < 2:
         return list(range(rank))

@@ -1605,9 +1605,11 @@ def _create_sdsc_tensors(
             layout_stick_size = [2, dtype_stick_size // 2]
             # The 2D stick packs 2 values of the weight's K dim against 64 of
             # its N (stick) dim, so stickDimOrder_ is [K, N] with the real
-            # stick dim last. The QFP8WT layout places K directly outside the
-            # stick (see qfp8wt_dim_order), so K is device coordinate -2 for
-            # every rank and every reader, including through a view.
+            # stick dim last. K sits directly outside the stick, at device
+            # coordinate -2, for every rank and every reader, including
+            # through a view: nonstick_dim_order puts it there for a matmul
+            # weight (from the matmul's reduction variable), and
+            # qfp8wt_dim_order does by default otherwise.
             companion = None
             k_syms = arg.device_coordinates[-2].subs(symbol_mapping).free_symbols
             if len(k_syms) == 1:
