@@ -7347,6 +7347,12 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             "param_sets": SCALED_BMM_QK_TESTS,
         },
         (
+            "test_fp8_scaled_bmm_separate_quantize",
+            "test_fp8_scaled_bmm_separate_quantize_cpu",
+        ): {
+            "param_sets": SCALED_BMM_QK_TESTS,
+        },
+        (
             "test_fp8_scaled_mm_granite_fp8_shapes",
             "test_fp8_scaled_mm_granite_fp8_shapes_cpu",
         ): {
@@ -11252,6 +11258,70 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
 
         with pytest.raises(Exception, match="reduces over its stick dim"):
             _compile_and_run(spyre_fn, [q, k, scale_a, scale_b], "spyre")
+
+    @staticmethod
+    def _scaled_bmm_on_device_weight(q, w_dev, scale_a, scale_b, permute=None):
+        """Compile q quantization + scaled_bmm against an already-quantized weight."""
+
+        def spyre_fn(q, w, scale_a, scale_b):
+            q_fp8 = torch.ops.spyre.quantize_fp8_with_scale(q, scale_a)
+            if permute is not None:
+                w = w.permute(*permute)
+            return torch.ops.spyre.scaled_bmm(
+                q_fp8, w, scale_a=scale_a, scale_b=scale_b, out_dtype=torch.float16
+            )
+
+        return _compile_and_run(spyre_fn, (q, w_dev, scale_a, scale_b), "spyre")
+
+    def test_fp8_scaled_bmm_separate_quantize_cpu(self, q, k, scale_a, scale_b):
+        """Standalone qfp8wt (eager), then scaled_bmm in a compiled graph.
+
+        The quantize runs alone, with no matmul to say which dim is K, so its
+        layout uses the default (host dim -2 = D next to the stick). The second
+        graph's nonstick_dim_order checks that weight, a graph input, against
+        the matmul's reduction variable.
+        """
+        k_t = k.transpose(-1, -2).contiguous()  # [B, H, D, S]
+        w_dev = torch.ops.spyre.quantize_weight_fp8_with_scale(
+            k_t.to("spyre"), scale_b.to("spyre")
+        )
+        target = self._scaled_bmm_on_device_weight(q, w_dev, scale_a, scale_b)
+
+        def pytorch_fn(q, k, scale_a, scale_b):
+            w = self._fp8_ref(k.transpose(-1, -2), scale_b)
+            return (self._fp8_ref(q, scale_a) @ w) * (scale_a * scale_b)
+
+        compare_with_pytorch(
+            None,
+            pytorch_fn,
+            q,
+            k,
+            scale_a,
+            scale_b,
+            atol=0.1,
+            rtol=0.1,
+            target=target,
+        )
+
+    @expects_raise
+    def test_fp8_scaled_bmm_separate_quantize_rejects_bad_orientation(self):
+        """Standalone qfp8wt on [B, D, H, S], then read through a permute.
+
+        The default puts host dim -2 (H) next to the stick, but the matmul's K
+        is D. The weight is a graph input in the second graph, so its layout
+        cannot be reordered there: rejected instead of computing wrongly.
+        TODO: an explicit K argument to quantize_weight_fp8_with_scale would
+        let the standalone quantize build the right layout.
+        """
+        q, k, scale_a, scale_b = SCALED_BMM_QK_TESTS["qk_1x32x128x128"]
+        w_dev = torch.ops.spyre.quantize_weight_fp8_with_scale(
+            k.permute(0, 3, 1, 2).contiguous().to("spyre"),  # [B, D, H, S]
+            scale_b.to("spyre"),
+        )
+        with pytest.raises(Exception, match="graph input with K"):
+            self._scaled_bmm_on_device_weight(
+                q, w_dev, scale_a, scale_b, permute=(0, 2, 1, 3)
+            )
 
     def test_fp8_scaled_mm_granite_fp8_shapes_cpu(self, m, k, n):
         """Regression test for SuperDSC aborts on FP8 _scaled_mm at Granite 8B shapes.
