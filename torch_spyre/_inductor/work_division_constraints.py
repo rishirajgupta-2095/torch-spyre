@@ -66,7 +66,6 @@ from .pass_utils import (
     build_operation_alignment_inputs,
     concretize_expr,
     device_coordinates,
-    host_coordinates,
     indirect_forbidden_split_syms,
     is_restickify_coords,
     op_read_writes,
@@ -754,7 +753,7 @@ def _qfp8wt_unsplittable_coords(td: "TensorDep") -> list[Expr]:
     """
     if len(td.layout.size) <= 2:
         return [td.device_coords[-2]]
-    return host_coordinates(td.layout, td.dep, None)
+    return list(td.device_coords)
 
 
 def qfp8wt_split_domains(ctx: WorkDivConstraintContext) -> ConstraintResult:

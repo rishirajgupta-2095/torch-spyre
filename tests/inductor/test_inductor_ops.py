@@ -812,6 +812,18 @@ SCALED_BMM_TESTS.update(
         for sa, sb in _SCALED_BMM_SCALES
     }
 )
+# Attention QK^T: q and k are both [B, H, S, D]; the weight is k^T = [B, H, D, S],
+# so D (head dim) is K and S (sequence) is N.
+_SCALED_BMM_QK_SHAPES = {
+    "qk_1x32x128x128": (1, 32, 128, 128),
+    "qk_1x32x256x128": (1, 32, 256, 128),
+    "qk_2x12x128x128": (2, 12, 128, 128),
+    "qk_1x12x384x128": (1, 12, 384, 128),
+}
+SCALED_BMM_QK_TESTS = {
+    key: _scaled_bmm_case(shape, shape, 2.0, 3.0)
+    for key, shape in _SCALED_BMM_QK_SHAPES.items()
+}
 FP32_EPS = torch.finfo(torch.float32).eps  # 1.1920928955078125e-07
 FP16_EPS = torch.finfo(torch.float16).eps  # 0.0009765625
 
@@ -7325,6 +7337,21 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         ("test_fp8_scaled_bmm", "test_fp8_scaled_bmm_cpu"): {
             "param_sets": SCALED_BMM_TESTS,
         },
+        ("test_fp8_scaled_bmm_kt_view", "test_fp8_scaled_bmm_kt_view_cpu"): {
+            "param_sets": SCALED_BMM_QK_TESTS,
+        },
+        (
+            "test_fp8_scaled_bmm_weight_permute",
+            "test_fp8_scaled_bmm_weight_permute_cpu",
+        ): {
+            "param_sets": SCALED_BMM_QK_TESTS,
+        },
+        (
+            "test_fp8_scaled_bmm_separate_quantize",
+            "test_fp8_scaled_bmm_separate_quantize_cpu",
+        ): {
+            "param_sets": SCALED_BMM_QK_TESTS,
+        },
         (
             "test_fp8_scaled_mm_granite_fp8_shapes",
             "test_fp8_scaled_mm_granite_fp8_shapes_cpu",
@@ -11146,6 +11173,159 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         compare_with_pytorch(
             spyre_fn, pytorch_fn, a, b, scale_a, scale_b, atol=0.1, rtol=0.1
         )
+
+    @staticmethod
+    def _fp8_ref(x, scale):
+        """CPU reference for quantize_*_fp8_with_scale, returned in fp16."""
+        return (
+            (x / scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).to(torch.float16)
+        )
+
+    def test_fp8_scaled_bmm_kt_view_cpu(self, q, k, scale_a, scale_b):
+        """Attention QK^T with a view before qfp8wt: k is transposed, then quantized.
+
+        qfp8wt writes a new [B, H, D, S] buffer, so K (the head dim D) is its
+        host dim -2 and also the matmul's reduction dim.
+        """
+
+        def spyre_fn(q, k, scale_a, scale_b):
+            q_fp8 = torch.ops.spyre.quantize_fp8_with_scale(q, scale_a)
+            w = torch.ops.spyre.quantize_weight_fp8_with_scale(
+                k.transpose(-1, -2), scale_b
+            )
+            return torch.ops.spyre.scaled_bmm(
+                q_fp8, w, scale_a=scale_a, scale_b=scale_b, out_dtype=torch.float16
+            )
+
+        def pytorch_fn(q, k, scale_a, scale_b):
+            w = self._fp8_ref(k.transpose(-1, -2), scale_b)
+            return (self._fp8_ref(q, scale_a) @ w) * (scale_a * scale_b)
+
+        compare_with_pytorch(
+            spyre_fn, pytorch_fn, q, k, scale_a, scale_b, atol=0.1, rtol=0.1
+        )
+
+    def test_fp8_scaled_bmm_weight_permute_cpu(self, q, k, scale_a, scale_b):
+        """qfp8wt writes the weight as [B, D, H, S]; the matmul reads it permuted.
+
+        K (the head dim D) is host dim 1 of the qfp8wt output, not dim -2, so
+        only the matmul's reduction variable identifies it. nonstick_dim_order
+        reorders the qfp8wt output layout to put D next to the stick.
+        """
+
+        def spyre_fn(q, k, scale_a, scale_b):
+            q_fp8 = torch.ops.spyre.quantize_fp8_with_scale(q, scale_a)
+            # [B, D, H, S]: K (D) is host dim 1 of the qfp8wt output
+            w = torch.ops.spyre.quantize_weight_fp8_with_scale(
+                k.permute(0, 3, 1, 2), scale_b
+            )
+            return torch.ops.spyre.scaled_bmm(
+                q_fp8,
+                w.permute(0, 2, 1, 3),  # view: [B, H, D, S]
+                scale_a=scale_a,
+                scale_b=scale_b,
+                out_dtype=torch.float16,
+            )
+
+        def pytorch_fn(q, k, scale_a, scale_b):
+            w = self._fp8_ref(k.permute(0, 3, 1, 2), scale_b).permute(0, 2, 1, 3)
+            return (self._fp8_ref(q, scale_a) @ w) * (scale_a * scale_b)
+
+        compare_with_pytorch(
+            spyre_fn, pytorch_fn, q, k, scale_a, scale_b, atol=0.1, rtol=0.1
+        )
+
+    @expects_raise
+    def test_fp8_scaled_bmm_rejects_reduction_over_stick(self):
+        """quantize, then transpose: the matmul's K is the QFP8WT stick dim.
+
+        The matmul needs N on the weight's stick, and a QFP8WT tensor cannot be
+        restickified, so layout propagation rejects it instead of computing with
+        the wrong pairing. (nonstick_dim_order's own stick check is a second
+        guard; test_qfp8wt_k_constraint.py covers its message.)
+        TODO: supporting it needs a restickify of the QFP8WT tensor.
+        """
+        q, k, scale_a, scale_b = SCALED_BMM_QK_TESTS["qk_1x32x128x128"]
+
+        def spyre_fn(q, k, scale_a, scale_b):
+            q_fp8 = torch.ops.spyre.quantize_fp8_with_scale(q, scale_a)
+            w = torch.ops.spyre.quantize_weight_fp8_with_scale(k, scale_b)
+            return torch.ops.spyre.scaled_bmm(
+                q_fp8,
+                w.transpose(-1, -2),  # [B, H, D, S]: D is w's stick dim
+                scale_a=scale_a,
+                scale_b=scale_b,
+                out_dtype=torch.float16,
+            )
+
+        with pytest.raises(
+            Exception, match="batchmatmulfp8: cannot restickify any input layout of y"
+        ):
+            _compile_and_run(spyre_fn, [q, k, scale_a, scale_b], "spyre")
+
+    @staticmethod
+    def _scaled_bmm_on_device_weight(q, w_dev, scale_a, scale_b, permute=None):
+        """Compile q quantization + scaled_bmm against an already-quantized weight."""
+
+        def spyre_fn(q, w, scale_a, scale_b):
+            q_fp8 = torch.ops.spyre.quantize_fp8_with_scale(q, scale_a)
+            if permute is not None:
+                w = w.permute(*permute)
+            return torch.ops.spyre.scaled_bmm(
+                q_fp8, w, scale_a=scale_a, scale_b=scale_b, out_dtype=torch.float16
+            )
+
+        return _compile_and_run(spyre_fn, (q, w_dev, scale_a, scale_b), "spyre")
+
+    def test_fp8_scaled_bmm_separate_quantize_cpu(self, q, k, scale_a, scale_b):
+        """Standalone qfp8wt (eager), then scaled_bmm in a compiled graph.
+
+        The quantize runs alone, with no matmul to say which dim is K, so its
+        layout uses the default (host dim -2 = D next to the stick). The second
+        graph's nonstick_dim_order checks that weight, a graph input, against
+        the matmul's reduction variable.
+        """
+        k_t = k.transpose(-1, -2).contiguous()  # [B, H, D, S]
+        w_dev = torch.ops.spyre.quantize_weight_fp8_with_scale(
+            k_t.to("spyre"), scale_b.to("spyre")
+        )
+        target = self._scaled_bmm_on_device_weight(q, w_dev, scale_a, scale_b)
+
+        def pytorch_fn(q, k, scale_a, scale_b):
+            w = self._fp8_ref(k.transpose(-1, -2), scale_b)
+            return (self._fp8_ref(q, scale_a) @ w) * (scale_a * scale_b)
+
+        compare_with_pytorch(
+            None,
+            pytorch_fn,
+            q,
+            k,
+            scale_a,
+            scale_b,
+            atol=0.1,
+            rtol=0.1,
+            target=target,
+        )
+
+    @expects_raise
+    def test_fp8_scaled_bmm_separate_quantize_rejects_bad_orientation(self):
+        """Standalone qfp8wt on [B, D, H, S], then read through a permute.
+
+        The default puts host dim -2 (H) next to the stick, but the matmul's K
+        is D. The weight is a graph input in the second graph, so its layout
+        cannot be reordered there: rejected instead of computing wrongly.
+        TODO: an explicit K argument to quantize_weight_fp8_with_scale would
+        let the standalone quantize build the right layout.
+        """
+        q, k, scale_a, scale_b = SCALED_BMM_QK_TESTS["qk_1x32x128x128"]
+        w_dev = torch.ops.spyre.quantize_weight_fp8_with_scale(
+            k.permute(0, 3, 1, 2).contiguous().to("spyre"),  # [B, D, H, S]
+            scale_b.to("spyre"),
+        )
+        with pytest.raises(Exception, match="graph input with K"):
+            self._scaled_bmm_on_device_weight(
+                q, w_dev, scale_a, scale_b, permute=(0, 2, 1, 3)
+            )
 
     def test_fp8_scaled_mm_granite_fp8_shapes_cpu(self, m, k, n):
         """Regression test for SuperDSC aborts on FP8 _scaled_mm at Granite 8B shapes.
