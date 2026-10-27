@@ -1085,8 +1085,8 @@ def scaled_bmm(
     FP8 batched matrix multiplication with per-tensor scales applied.
 
     mat1 [*batch, M, K] @ mat2 [*batch, K, N] -> [*batch, M, N], with matching
-    leading batch dims. Consumers (fms-model-optimizer / vLLM) call this for
-    FP8 attention QK, e.g. query[B, H, S, D] @ key_T[B, H, D, S].
+    leading batch dims. Used for FP8 attention QK, e.g.
+    query[B, H, S, D] @ key_T[B, H, D, S].
 
     aten has no batched equivalent of _scaled_mm to decompose from, so this op
     plays that role: scaled_bmm_decomp rewrites it into the raw spyre.bmm_fp8
