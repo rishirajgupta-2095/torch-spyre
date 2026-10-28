@@ -271,6 +271,9 @@ _FP16_MIN = -65504.0
 # 16-bit halves are constructed directly from their bit patterns.
 _FP32_MIN = struct.unpack("<f", struct.pack("<I", 0xFF7FFF7F))[0]  # -3.40279751e38
 _FP32_MAX = struct.unpack("<f", struct.pack("<I", 0x7F7F7F7F))[0]  # 3.39617752e38
+_FP32_ALMOST_1 = struct.unpack("<f", struct.pack("<I", 0x3F803F80))[
+    0
+]  # 1.0019378662109375
 
 _PADDING_MASK_VALUES: dict[str, dict[DataFormats, float]] = {
     "max": {
@@ -283,10 +286,27 @@ _PADDING_MASK_VALUES: dict[str, dict[DataFormats, float]] = {
     },
     "exp": {
         DataFormats.SEN169_FP16: -1e4,  # exp(-1e4) underflows to 0 in fp16; see NOTE above.
+        DataFormats.IEEE_FP32: _FP32_MIN,
+    },
+    "reciprocal": {
+        DataFormats.SEN169_FP16: float("inf"),
+        DataFormats.IEEE_FP32: _FP32_MAX,
+    },
+    "rsqrt": {
+        DataFormats.SEN169_FP16: float("inf"),
+        DataFormats.IEEE_FP32: _FP32_MAX,
+    },
+    "log": {
+        DataFormats.SEN169_FP16: 1,
+        DataFormats.IEEE_FP32: _FP32_ALMOST_1,
+    },
+    "realdiv": {
+        DataFormats.SEN169_FP16: float("inf"),
+        DataFormats.IEEE_FP32: _FP32_MAX,
     },
 }
 
-_POINTWISE_PADDING_OPS: set[str] = {"exp"}
+_POINTWISE_PADDING_OPS: set[str] = {"exp", "reciprocal", "rsqrt", "log", "realdiv"}
 
 
 def _get_mask_value(
@@ -296,7 +316,11 @@ def _get_mask_value(
 
 
 def _get_coordinate_mask(
-    iteration_space: dict, arg: SDSCArgs, dim_padding: dict, op: str = ""
+    iteration_space: dict,
+    arg: SDSCArgs,
+    dim_padding: dict,
+    op: str = "",
+    inputs: list[SDSCArgs] | None = None,
 ) -> dict:
     # Reduction path: mask the stick dim being reduced (scale == -2), so the
     # padding lanes take the reduction identity.
@@ -305,27 +329,17 @@ def _get_coordinate_mask(
     # SDPA pads only the stick dim, so this emits a single-dim mask; the multi-dim
     # case is unexercised (see the BANDAGE note on _PADDING_MASK_VALUES).
     #
-    # SAMV coordinate masking is limited to <=16-bit element types by the
-    # backend compiler ("Coordinate masking is supported only up to 16bit
-    # element types"), so the pointwise padding mask cannot be emitted for FP32.
-    # Skipping it is what lets unaligned FP32 `exp` compile at all.
-    #
-    # Risk: the padded lanes of an unaligned FP32 `exp` output hold
-    # `exp(uninitialized)`, so any consumer that ITERATES the padded extent may
-    # produce unexpected results -- a contraction does, since it reads the whole
-    # stick as an operand. Note a restickify also iterates the padded extent and
-    # emits no mask, so the values are relocated rather than dropped; they stay
-    # harmless only as long as the eventual consumer iterates the logical extent.
-    # Known use cases do not hit this limitation:
-    #   * SDPA (softmax -> matmul, the consumer the mask was added for, #3248)
-    #     runs in fp16, where the mask is still applied.
-    #   * The Gemma-4 MoE router (softmax with dtype=torch.float32 -> topk) uses
-    #     stick-aligned tensors, so there are no padded lanes to begin with.
-    # Revisit if either assumption changes. See #3799 (SAMV masking for exp) and
-    # #3290 (padded-stick-state layout enum, the principled replacement for this
-    # bandage).
-    mask_pointwise = (
-        op in _POINTWISE_PADDING_OPS and arg.data_format != DataFormats.IEEE_FP32
+    # Skip the pointwise mask when an input is broadcast along a padded dim
+    # (scale != 1, e.g. x / x.sum(-1, keepdim=True)). SAMV then substitutes the
+    # mask value only into the inputs that iterate the dim, so realdiv computes
+    # inf / y == inf instead of 0. Worse, for some widths (e.g. 6 sticks) the
+    # backend applies the mask to valid lanes and corrupts the result,
+    # whatever the mask value. Unmasked, the valid lanes are correct.
+    mask_pointwise = op in _POINTWISE_PADDING_OPS and all(
+        inp.scales.get(dim) == 1
+        for inp in inputs or []
+        for dim, padding in dim_padding.items()
+        if padding > 0
     )
     return {
         dim: [[iteration_space[dim] - padding, padding]]
@@ -709,7 +723,29 @@ def _match_labels_by_structure(op_spec: "OpSpec") -> dict | None:
     # Output roles: non-stick output symbols in coordinate order are
     # [out_h, out_w, batch] (batch trails the spatial dims in the output layout).
     out_spatial = _ordered_arg_symbols(out_arg, exclude=(channel,))
-    spatial_roles = ["out_h", "out_w", "batch"]
+    # When the output height is degenerate (H_out == 1) the surviving spatial
+    # symbol is a **width** axis, so ``out_h`` must not be offered as a role.
+    # Two shapes reach here that way: a rank-3 conv1d, which
+    # ``lower_convolution`` models as a conv2d with H_in = kH = sH = 1 and whose
+    # real geometry therefore lives in the ``w`` slot; and a rank-4 conv2d whose
+    # H_out simplified to 1.  Zipping the canonical ``[out_h, out_w, batch]``
+    # order would hand the lone axis ``out_h`` -> ``i``, whose SDSC padding entry
+    # is then built from ``stride_h``/``kernel_h`` (1 for a conv1d) instead of the
+    # true width geometry, so ``totalSize_`` collapses to the output extent and
+    # every tap past the first reads the wrong element.  Measured wrong by ~55
+    # (conv1d) and ~48 (rank-4 H_out==1) at stride 2; stride 1 was correct only
+    # because stride_h == stride_w there.
+    #
+    # Keyed on H_out rather than on the rank, so both shapes are covered: rank is
+    # only a proxy, and a rank-4 conv2d with H_out == 1 has the same defect.
+    ranges = op_spec.node_output_ranges
+    height_is_degenerate = ranges is not None and (
+        len(ranges) == 3  # conv1d: no height axis at all
+        or (len(ranges) == 4 and _is_static_one(ranges[2]))  # NCHW, H_out == 1
+    )
+    spatial_roles = (
+        ["out_w", "batch"] if height_is_degenerate else ["out_h", "out_w", "batch"]
+    )
     if len(out_spatial) > len(spatial_roles):
         return None
     role_of = dict(zip(out_spatial, spatial_roles))
@@ -795,17 +831,32 @@ def _align_conv2d_dim_labels(
     ``lower_avg_pool2d`` delegates to the in-tree lowering when
     ``kH == 1 or kW == 1``, so a pool ``SpyreReduction`` always has both window
     dims, but conv2d explicitly supports 1x1 / 1xN / Nx1 kernels.
+
+    A **depthwise conv1d** arrives at rank 3, ``[N, C, W_out]``, with no height
+    entry.
     """
-    if node_output_ranges is None or len(node_output_ranges) != 4:
+    if node_output_ranges is None or len(node_output_ranges) not in (3, 4):
         raise ValueError(
-            "conv2d node_output_ranges must be NCHW [N, C, H_out, W_out]; got "
-            f"{node_output_ranges!r}"
+            "conv2d node_output_ranges must be NCHW [N, C, H_out, W_out], or "
+            f"[N, C, W_out] for a rank-3 conv1d; got {node_output_ranges!r}"
+        )
+    is_1d = len(node_output_ranges) == 3
+    if is_1d and not _is_static_one(kernel_h):
+        raise ValueError(
+            "conv1d node_output_ranges [N, C, W_out] implies a degenerate "
+            f"height, but kernel_h is {kernel_h!r}, not 1"
         )
     # Full canonical label list with each entry's unit-ness, in iteration-space
     # order: output roles (mb, out, i, j) then window roles (ki, kj).
+    range_of_role = {
+        "batch": node_output_ranges[0],
+        "channel": node_output_ranges[1],
+        "out_h": Integer(1) if is_1d else node_output_ranges[2],
+        "out_w": node_output_ranges[-1],
+    }
     candidates: list[tuple[str, bool]] = [
-        (label, _is_static_one(node_output_ranges[pos]))
-        for pos, (_role, label) in enumerate(_CONV2D_ROLE_LABELS)
+        (label, _is_static_one(range_of_role[role]))
+        for role, label in _CONV2D_ROLE_LABELS
     ]
     candidates.append((_CONV2D_WINDOW_DIM_I, _is_static_one(kernel_h)))
     candidates.append((_CONV2D_WINDOW_DIM_J, _is_static_one(kernel_w)))
@@ -1061,15 +1112,14 @@ def _build_conv2d_symbol_mapping(
     kernel_h = conv_params.get("kernel_h")
     kernel_w = conv_params.get("kernel_w")
     sym_list = list(op_spec.iteration_space.keys())
+    ranges = op_spec.node_output_ranges
 
-    if kernel_h is None or kernel_w is None or op_spec.node_output_ranges is None:
+    if kernel_h is None or kernel_w is None or ranges is None:
         # No kernel sizes or no live output ranges: keep the caller's positional
         # mapping rather than guessing.
         return {sym: Symbol(dim_labels[i]) for i, sym in enumerate(sym_list)}
 
-    labels = _align_conv2d_dim_labels(
-        op_spec.node_output_ranges, len(sym_list), kernel_h, kernel_w
-    )
+    labels = _align_conv2d_dim_labels(ranges, len(sym_list), kernel_h, kernel_w)
 
     # The label list is in canonical order (mb, out, i, j, ki, kj minus the
     # squeezed roles), but the *iteration space* is not guaranteed to be.  It is
@@ -1087,7 +1137,11 @@ def _build_conv2d_symbol_mapping(
     needs_reorder = all(lbl in labels for lbl in window_labels) and all(
         lbl in labels for lbl in spatial_labels
     )
-    if needs_reorder and _is_static_one(op_spec.node_output_ranges[2]):
+    # Rank 3 (conv1d) has no H_out entry, and position 2 there is W_out -- but a
+    # conv1d also drops i/ki, so needs_reorder is already False. Gate on the rank
+    # anyway so the index below is only ever taken against a real NCHW tuple,
+    # rather than depending on that short-circuit.
+    if needs_reorder and len(ranges) == 4 and _is_static_one(ranges[2]):
         sym_to_size = {
             sym: _concretize_for_sdsc(size)
             for sym, (size, _) in op_spec.iteration_space.items()
@@ -2383,7 +2437,7 @@ def parse_op_spec(op_spec: OpSpec) -> tuple["SDSCSpec", "dict"]:
             dict(op_spec.op_info.get("constants", {})) if op_spec.op_info else {}
         )
     coordinate_masking = _get_coordinate_mask(
-        sdsc_iteration_space, args[-1], padding, op_spec.op
+        sdsc_iteration_space, args[-1], padding, op_spec.op, args[:-1]
     )
     masking_const_id = -1
     if coordinate_masking:

@@ -56,7 +56,6 @@ from torch.fx.experimental.symbolic_shapes import free_unbacked_symbols
 from torch._inductor.virtualized import V
 from torch.utils._ordered_set import OrderedSet
 from torch_spyre._C import (
-    DataFormats,
     ElementArrangement,
     SpyreTensorLayout,
     get_device_dtype,
@@ -75,11 +74,19 @@ from .constants import (
     ELIDED_COPY_BACK_ATTR,
     KEEP_BY_INDEX_OP,
     MATMUL_REDUCTION_OPS,
+    RESTICKIFY_SUPPORTED_DEVICE_DTYPES,
     TOPK_OPS,
 )
 from .ir import FixedTiledLayout, SpyreConstantFallback
 from .logging_utils import get_inductor_logger
 from .loop_info import copy_op_metadata
+from .pass_counters import (
+    COUNTERS,
+    DEVICE_COORDINATES,
+    HOST_COORDINATES,
+    READ_WRITES_MISSES,
+    READ_WRITES_REQUESTS,
+)
 from .provenance import preserve_provenance
 from .views import (
     AlignmentInputs,
@@ -104,24 +111,32 @@ def register_operation_after_graph_edit(graph: GraphLowering, op: Operation) -> 
     same name.  The scheduler subsequently resolves a dependency to the wrong
     producer (or to one that occurs later) and fails while computing ancestors.
 
-    Keep upstream's naming convention, but find the first name that is not
-    currently registered.  Most removals keep the removed op in ``name_to_op``,
-    but ``dedup_and_promote_constants`` drops it, so its name can be reissued.
+    Keep upstream's naming convention, but find the first name that was never
+    issued during this compile.  Checking ``name_to_op`` alone is insufficient:
+    ``dedup_and_promote_constants`` pops a merged constant's entry, so its name
+    appears free even though a live op still carries it.  ``_unique_operation_names``
+    stamps ``_spyre_issued_op_names`` on the graph before the first registration;
+    that set accumulates every name ever handed out and is never modified by
+    graph-pruning passes, so freed names cannot be reissued.
+
     Scratchpad edits use this helper because they run late in the lowering
     pipeline, after graph-pruning passes.
     """
     assert op.operation_name is None, f"Operation registered twice: {op}"
 
+    issued = getattr(graph, "_spyre_issued_op_names", graph.name_to_op)
     index = len(graph.operations)
     while True:
         name = graph.qualify_name(f"op{index}")
-        if name not in graph.name_to_op:
+        if name not in issued:
             break
         index += 1
 
     graph.operations.append(op)
     graph.name_to_op[name] = op
     op.operation_name = name
+    if issued is not graph.name_to_op:
+        issued.add(name)
     return name
 
 
@@ -263,8 +278,12 @@ def op_read_writes(op: Operation) -> ReadWrites:
     we cache it under a private key only this helper reads -- a non-planner
     caller (e.g. later-pass codegen) still goes through the real method.
     """
+    if COUNTERS.enabled:
+        COUNTERS.bump(READ_WRITES_REQUESTS)
     rw = op.__dict__.get("_ts_cached_read_writes")
     if rw is None:
+        if COUNTERS.enabled:
+            COUNTERS.bump(READ_WRITES_MISSES)
         rw = op.get_read_writes()
         op.__dict__["_ts_cached_read_writes"] = rw
     return rw
@@ -1220,6 +1239,8 @@ def host_coordinates(
     Returns:
         One coordinate expression per host dimension.
     """
+    if COUNTERS.enabled:
+        COUNTERS.bump(HOST_COORDINATES)
     # Concretize size/stride so compute_coordinates can use plain ``<``/``>``
     # comparisons.  var_ranges and index stay symbolic so the *output*
     # coordinate expressions remain symbolic.
@@ -1486,6 +1507,13 @@ def device_coordinates(
         One coordinate expression per device dimension; the last element is
         the stick expression.
     """
+    if COUNTERS.enabled:
+        # Defined as constructions, not asks: a reader treats the count as the
+        # work because nothing memoizes this today. #4245 adds a shared memo, and
+        # whichever of the two lands second must bump this only on the miss path
+        # and count asks under a separate ``device_coordinates.requests`` -- a
+        # single counter spanning both stops measuring either.
+        COUNTERS.bump(DEVICE_COORDINATES)
     index = per_trip_index(op, dep.index) if op is not None else dep.index
     coords = alignment_coordinates(stl, index, dep.ranges, indirect_sizes)
     if check_stick_expr:
@@ -2513,14 +2541,22 @@ def compute_restickify_needed(
     ):
         return False, None
 
-    # ReStickifyOpHBM supports only the native FP16 device format
-    # (both logical float16 and bfloat16 map to SEN169_FP16).
+    # ReStickifyOpHBM supports the DL16 format (FP16/BF16 both map to
+    # SEN169_FP16), IEEE_FP32, and the 32-bit integer formats (INT32/UINT32;
+    # int64 is downcast to IEEE_INT32 on the device).
     # Do not advertise an edge as feasible when codegen cannot lower it: this
     # is especially important for fp32-upcast graphs, where a later IEEE_FP32
     # restick can otherwise tie with and displace the valid FP16 restick before
     # the conversion. This also deliberately precedes the factorized-layout
-    # target below: a concrete target is not actionable for a non-DL16 input.
-    if in_stl.device_dtype != DataFormats.SEN169_FP16:
+    # target below: a concrete target is not actionable for an unsupported input.
+    if in_stl.device_dtype not in RESTICKIFY_SUPPORTED_DEVICE_DTYPES:
+        return True, None
+    # Reject inputs whose element_arrangement is not STANDARD for every dtype,
+    # including fp16/bf16. compute_restickify_target_layout always builds its
+    # target as SpyreTensorLayout(..., element_arrangement=STANDARD) (the default);
+    # restickifying a staggered input (e.g. DL16_TO_FP32, FP32_TO_DL16) would
+    # silently drop the stagger and produce wrong data after the conversion.
+    if in_stl.element_arrangement != ElementArrangement.STANDARD:
         return True, None
 
     if factorized_layout_mismatch:
@@ -3608,6 +3644,41 @@ def _per_core_view_from_prep(
                     f"returning empty_view"
                 )
                 return unrepresentable
+
+        # Repack can put an outer loop inside one physical stick-count axis:
+        # 2*head + floor(width/64). Head's host stride128 has no direct match
+        # in [64, 1024, 1], yet head4 owns four contiguous stick groups. The
+        # multi-axis decomposition below cannot infer a single driven axis.
+        # Reuse the relayout projector's whole-rectangle containment proof;
+        # do not infer ownership just from a divisible host stride.
+        if (
+            dev_dim is None
+            and config.lx_planner_relayout
+            and config.lx_extended_ownership
+        ):
+            from .slice_ownership import project_slice_axis
+
+            driven = [
+                axis
+                for axis, coord in enumerate(prep.dep_device_coordinates)
+                if sym in coord.free_symbols
+            ]
+            if len(driven) == 1 and driven[0] != len(device_size) - 1:
+                axis = driven[0]
+                coordinate = prep.dep_device_coordinates[axis]
+                if device_size[axis] % split == 0 and all(
+                    per_sym.get(other, 1) == 1
+                    for other in coordinate.free_symbols - {sym}
+                ):
+                    projected = project_slice_axis(
+                        coordinate,
+                        int(device_size[axis]),
+                        split,
+                        iter_space,
+                        floor_only=True,
+                    )
+                    if projected is not None and projected[0] == sym:
+                        dev_dim = axis
 
         # Multi-stick-stride rescue: a consumer view subdivides the stickified
         # axis at k sticks per step (h = k * num_stick_stride). Only safe when
