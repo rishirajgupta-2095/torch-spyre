@@ -366,6 +366,35 @@ class _GatherScenarios:
             lambda k, i: torch.index_select(k, 0, i), pages, idx, expect=GATHER_OP_SPEC
         )
 
+    def test_index_select_fp8_qfp8ch_source(self):
+        """index_select from FP8 pages quantized on device by qfp8ch (#4711).
+
+        quantize_fp8_with_scale produces the QFP8CH element arrangement, which
+        is what an FP8 KV cache holds when K/V are quantized on device. The
+        pages are gathered and dequantized back to fp16 on device, the
+        attention read path. Inputs are small integers and the scale is 1.0,
+        so quantize and dequantize are exact and the compare is exact.
+
+        The gathered FP8 is not read back to the host directly: a QFP8CH tensor
+        copied to the host comes back in device element order with or without a
+        gather (the device-to-host conversion special-cases only QFP8WT), so
+        that check would test the host copy, not the gather.
+        """
+        NP, BLK, KVH, HD, P = 64, 64, 8, 128, 32
+        x = torch.randint(-10, 10, (NP, BLK, KVH, HD)).to(torch.float16)
+        scale = torch.tensor([1.0], dtype=torch.float16)
+        idx = torch.randperm(NP)[:P].to(torch.int32)
+
+        def kernel(x, scale, idx):
+            q = torch.ops.spyre.quantize_fp8_with_scale(x, scale)
+            g = torch.index_select(q, 0, idx)
+            return torch.ops.spyre.dequantize_fp8_with_scale(g, scale)
+
+        actual = torch.compile(kernel, dynamic=False)(
+            x.to("spyre"), scale.to("spyre"), idx.to("spyre")
+        ).cpu()
+        torch.testing.assert_close(actual, torch.index_select(x, 0, idx))
+
     def test_index_select_with_exp(self):
         x, i = self._xi(P=32)
         self._stage_and_e2e(
