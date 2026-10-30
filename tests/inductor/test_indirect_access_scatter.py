@@ -247,6 +247,7 @@ class _ScatterScenarios:
             device_size=[M, H, (D + eps - 1) // eps, Bn, eps],
             stride_map=[D, M * D, eps, H * M * D, 1],
             device_dtype=get_device_dtype(dtype),
+            valid_elements={(0,): M, (1,): H, (2, 4): D, (3,): Bn},
         )
 
         def store(dst, src, idx):
@@ -265,7 +266,7 @@ class _ScatterScenarios:
                 src.to(dtype).to("spyre"),
                 idx.to("spyre"),
             ).cpu()
-            torch.testing.assert_close(actual.float(), expected)
+            torch.testing.assert_close(actual.float(), expected, atol=0, rtol=0)
 
     def test_index_copy_fp8_e4m3_paged_kv_cache_e2e(self):
         """FP8 index_copy into a paged-KV-cache-shaped destination (#4710).
@@ -283,6 +284,7 @@ class _ScatterScenarios:
             device_size=[L, H, (D + eps - 1) // eps, eps],
             stride_map=[H * D, D, eps, 1],
             device_dtype=get_device_dtype(dtype),
+            valid_elements={(0,): L, (1,): H, (2, 3): D},
         )
 
         def kernel(c, s, i):
@@ -300,7 +302,7 @@ class _ScatterScenarios:
                     src.to(dtype).to("spyre"),
                     idx.to("spyre"),
                 ).cpu()
-                torch.testing.assert_close(actual.float(), expected)
+                torch.testing.assert_close(actual.float(), expected, atol=0, rtol=0)
 
     def test_index_put_p7(self):
         """y[idx] = src -- 1-D scatter with an odd (non-power-of-2) P=7."""

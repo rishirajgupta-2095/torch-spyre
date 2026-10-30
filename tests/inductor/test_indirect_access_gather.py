@@ -393,7 +393,9 @@ class _GatherScenarios:
         actual = torch.compile(kernel, dynamic=False)(
             x.to("spyre"), scale.to("spyre"), idx.to("spyre")
         ).cpu()
-        torch.testing.assert_close(actual, torch.index_select(x, 0, idx))
+        torch.testing.assert_close(
+            actual, torch.index_select(x, 0, idx), atol=0, rtol=0
+        )
 
     def test_index_select_with_exp(self):
         x, i = self._xi(P=32)
