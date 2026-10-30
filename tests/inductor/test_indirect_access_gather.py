@@ -326,23 +326,26 @@ class _GatherScenarios:
         self._stage_and_e2e(
             lambda x, i: torch.index_select(x, 0, i), x, i, expect=GATHER_OP_SPEC
         )
-    
-    def test_index_select_fp8_e4m3(self):
-        """FP8 (torch.float8_e4m3fn) gather via index_select on SEN143_FP8.
 
-        Verifies that keepbyindex correctly processes 128-elems/stick FP8 source
-        tensors and produces FP8 output without raising Unsupported op_spec errors.
+    def test_index_select_fp8_e4m3(self):
+        """FP8 (torch.float8_e4m3fn) gather via index_select (#4710, #4711).
+
+        The gather lowers to an identity copy with IndirectAccess on the input,
+        which create_op_spec allows for every dtype, so no SPYRE_FP8_OPS entry
+        is needed. N=256 is two 128-element FP8 sticks per row, so the source
+        relayout that puts the indexed dim outermost also runs on FP8 data.
+        Small integers are exact in E4M3, so the e2e compare is exact.
         """
         M, N, P = 128, 256, 32
         dtype = torch.float8_e4m3fn
-        x = self.to_spyre(torch.randint(-10, 10, (M, N), dtype=torch.int8).to(dtype))
+        x = self.to_spyre(torch.randint(-10, 10, (M, N)).float().to(dtype))
         i = torch.randint(0, M, (P,), dtype=torch.int32).to("spyre")
         self.name_dims(x, {"M": M, "N": N})
         self.name_dims(i, {"P": P})
         self._stage_and_e2e(
             lambda x, i: torch.index_select(x, 0, i), x, i, expect=GATHER_OP_SPEC
         )
-    
+
     def test_index_select_with_exp(self):
         x, i = self._xi(P=32)
         self._stage_and_e2e(
