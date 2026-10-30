@@ -346,6 +346,26 @@ class _GatherScenarios:
             lambda x, i: torch.index_select(x, 0, i), x, i, expect=GATHER_OP_SPEC
         )
 
+    def test_index_select_fp8_e4m3_paged_kv_cache(self):
+        """FP8 page gather from a paged KV cache via index_select (#4711).
+
+        Mirrors the paged-attention page read k_pages.index_select(0, page_idx):
+        pages [num_pages, block=64, kv_heads=8, head_dim=128] in FP8 (head_dim is
+        one 128-element FP8 stick), gathered by 32 unique page ids. The pages
+        come from the host, so they are in STANDARD element order; see
+        test_index_select_fp8_qfp8ch_source for pages quantized on device.
+        """
+        NP, BLK, KVH, HD, P = 64, 64, 8, 128, 32
+        dtype = torch.float8_e4m3fn
+        pages = torch.randint(-10, 10, (NP, BLK, KVH, HD)).float().to(dtype)
+        pages = self.to_spyre(pages)
+        idx = torch.randperm(NP)[:P].to(torch.int32).to("spyre")
+        self.name_dims(pages, {"NP": NP, "BLK": BLK, "KVH": KVH, "HD": HD})
+        self.name_dims(idx, {"P": P})
+        self._stage_and_e2e(
+            lambda k, i: torch.index_select(k, 0, i), pages, idx, expect=GATHER_OP_SPEC
+        )
+
     def test_index_select_with_exp(self):
         x, i = self._xi(P=32)
         self._stage_and_e2e(
